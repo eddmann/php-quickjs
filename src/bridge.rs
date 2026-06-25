@@ -8,6 +8,7 @@
 //! changes this ABI.
 
 use crate::engine::{pop_ctx, push_ctx, Engine};
+use crate::error::{throw_host_error, HostError};
 use crate::handles::HandleTable;
 use crate::manifest::ManifestEntry;
 use crate::marshal::{middle_to_zval, zval_to_middle, MiddleValue};
@@ -98,37 +99,42 @@ impl BridgeState {
 }
 
 /// Invoke a PHP callable with already-marshaled args, returning its result.
-fn call_php(callable_zv: &Zval, args: &[MiddleValue], state: &BridgeState) -> Result<MiddleValue, String> {
+fn call_php(
+    callable_zv: &Zval,
+    args: &[MiddleValue],
+    state: &BridgeState,
+) -> Result<MiddleValue, HostError> {
     let zvals: Vec<Zval> = args
         .iter()
         .map(|m| middle_to_zval(m, state))
-        .collect::<Result<_, _>>()?;
+        .collect::<Result<_, _>>()
+        .map_err(HostError::internal)?;
     let params: Vec<&dyn IntoZvalDyn> = zvals.iter().map(|z| z as &dyn IntoZvalDyn).collect();
 
-    let callable = ZendCallable::new(callable_zv).map_err(|e| e.to_string())?;
+    let callable = ZendCallable::new(callable_zv).map_err(|e| HostError::internal(e.to_string()))?;
     let ret = callable
         .try_call(params)
-        .map_err(crate::error::php_error_message)?;
-    zval_to_middle(&ret, state)
+        .map_err(crate::error::php_exception_info)?;
+    zval_to_middle(&ret, state).map_err(HostError::internal)
 }
 
-/// Dispatch a named host call. Returns `Err(message)` for an unknown capability
-/// or a failed call.
-fn host_call(state: &BridgeState, name: &str, args: Vec<MiddleValue>) -> Result<MiddleValue, String> {
+/// Dispatch a named host call. Returns `Err` for an unknown capability (the
+/// trust-boundary rejection) or a failed call.
+fn host_call(state: &BridgeState, name: &str, args: Vec<MiddleValue>) -> Result<MiddleValue, HostError> {
     let callable_zv = state
         .dispatch
         .borrow()
         .get(name)
         .map(Zval::shallow_clone)
-        .ok_or_else(|| format!("unknown capability: {name}"))?;
+        .ok_or_else(|| HostError::internal(format!("unknown capability: {name}")))?;
     call_php(&callable_zv, &args, state)
 }
 
 /// Invoke an anonymous PHP callable (one previously handed to JS) by id.
-fn php_fn_call(state: &BridgeState, id: u64, args: Vec<MiddleValue>) -> Result<MiddleValue, String> {
+fn php_fn_call(state: &BridgeState, id: u64, args: Vec<MiddleValue>) -> Result<MiddleValue, HostError> {
     let callable_zv = state
         .get_php_fn(id)
-        .ok_or_else(|| format!("unknown PHP callable id {id}"))?;
+        .ok_or_else(|| HostError::internal(format!("unknown PHP callable id {id}")))?;
     call_php(&callable_zv, &args, state)
 }
 
@@ -168,7 +174,7 @@ pub fn install<'js>(ctx: &Ctx<'js>, state: Rc<BridgeState>) -> rquickjs::Result<
             pop_ctx();
             match result {
                 Ok(r) => encode_result(&ctx, r),
-                Err(msg) => Err(Exception::throw_message(&ctx, &msg)),
+                Err(err) => Err(throw_host_error(&ctx, &err)),
             }
         },
     )?;
@@ -188,7 +194,7 @@ pub fn install<'js>(ctx: &Ctx<'js>, state: Rc<BridgeState>) -> rquickjs::Result<
             pop_ctx();
             match result {
                 Ok(r) => encode_result(&ctx, r),
-                Err(msg) => Err(Exception::throw_message(&ctx, &msg)),
+                Err(err) => Err(throw_host_error(&ctx, &err)),
             }
         },
     )?;

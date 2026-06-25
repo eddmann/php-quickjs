@@ -6,15 +6,18 @@ mod bridge;
 mod callback;
 mod engine;
 mod error;
+mod exceptions;
 mod handles;
 mod manifest;
 mod marshal;
 
 use engine::Engine;
+use exceptions::QuickJSEvalException;
 use marshal::{js_to_middle, middle_to_js, middle_to_zval, zval_to_middle};
 
 /// An embedded QuickJS sandbox with a typed, bidirectional PHP bridge.
 #[php_class]
+#[php(name = "QuickJS")]
 pub struct QuickJS {
     engine: Rc<Engine>,
 }
@@ -46,12 +49,12 @@ impl QuickJS {
     pub fn eval(&self, code: String) -> PhpResult<Zval> {
         let state = self.engine.state.clone();
         self.engine.ctx.with(|ctx| {
-            bridge::install(&ctx, state.clone())
-                .map_err(|e| PhpException::default(error::js_error_message(&ctx, e)))?;
-            let value: rquickjs::Value = ctx
-                .eval(code)
-                .map_err(|e| PhpException::default(error::js_error_message(&ctx, e)))?;
-            let middle = js_to_middle(&ctx, value, &state).map_err(to_php_err)?;
+            let eval_err = |e| {
+                PhpException::from_class::<QuickJSEvalException>(error::js_error_message(&ctx, e))
+            };
+            bridge::install(&ctx, state.clone()).map_err(eval_err)?;
+            let value: rquickjs::Value = ctx.eval(code).map_err(eval_err)?;
+            let middle = js_to_middle(&ctx, value, &state).map_err(eval_err)?;
             middle_to_zval(&middle, &state).map_err(PhpException::default)
         })
     }
@@ -101,5 +104,12 @@ fn to_php_err<E: std::fmt::Display>(e: E) -> PhpException {
 
 #[php_module]
 pub fn module(module: ModuleBuilder) -> ModuleBuilder {
-    module.class::<QuickJS>().class::<callback::JsCallback>()
+    module
+        // Exceptions first so subclasses can resolve their parent class entry.
+        .class::<exceptions::QuickJSException>()
+        .class::<exceptions::QuickJSEvalException>()
+        .class::<exceptions::QuickJSTimeoutException>()
+        .class::<exceptions::QuickJSMemoryException>()
+        .class::<QuickJS>()
+        .class::<callback::JsCallback>()
 }
