@@ -12,21 +12,6 @@ pub struct ManifestEntry {
     pub types: Option<String>,
 }
 
-/// Emit the manifest as a JSON array of `{name, types}` objects.
-pub fn to_json(entries: &[ManifestEntry]) -> serde_json::Value {
-    serde_json::Value::Array(
-        entries
-            .iter()
-            .map(|e| {
-                serde_json::json!({
-                    "name": e.name,
-                    "types": e.types,
-                })
-            })
-            .collect(),
-    )
-}
-
 /// A node in the nested namespace tree built from dotted names.
 #[derive(Default)]
 struct Node {
@@ -156,13 +141,5 @@ mod tests {
         assert!(dts.contains("query(sql: string): unknown[];"));
         assert!(dts.contains("execute(...args: any[]): any;"));
         assert!(dts.contains("info(msg: string): void;"));
-    }
-
-    #[test]
-    fn json_shape() {
-        let entries = vec![e("a.b", Some("b(): void"))];
-        let j = to_json(&entries);
-        assert_eq!(j[0]["name"], "a.b");
-        assert_eq!(j[0]["types"], "b(): void");
     }
 }

@@ -1,3 +1,8 @@
+// The constructor exposes camelCase PHP named arguments (`memoryLimit`,
+// `timeoutMs`, `maxStack`) to match the public API; ext-php-rs derives PHP arg
+// names from the Rust idents, so the non-snake-case lint is allowed here.
+#![allow(non_snake_case)]
+
 use ext_php_rs::prelude::*;
 use ext_php_rs::types::Zval;
 use std::rc::Rc;
@@ -27,10 +32,9 @@ pub struct QuickJS {
 impl QuickJS {
     /// Construct a sandbox. All limits default to unbounded; pass non-zero
     /// values to contain resource abuse:
-    /// - `memory_limit`: max heap bytes (alloc-bomb guard)
-    /// - `timeout_ms`: wall-clock budget per `eval` (infinite-loop guard)
-    /// - `max_stack`: max native stack bytes
-    #[allow(non_snake_case)]
+    /// - `memoryLimit`: max heap bytes (alloc-bomb guard)
+    /// - `timeoutMs`: wall-clock budget per `eval` (infinite-loop guard)
+    /// - `maxStack`: max native stack bytes
     #[php(defaults(memoryLimit = None, timeoutMs = None, maxStack = None))]
     pub fn __construct(
         memoryLimit: Option<i64>,
@@ -75,6 +79,36 @@ impl QuickJS {
         });
         self.engine.disarm_deadline();
         result
+    }
+
+    /// Return the registration manifest as an array of `['name'=>..., 'types'=>...]`.
+    pub fn manifest(&self) -> PhpResult<Zval> {
+        let state = &self.engine.state;
+        let entries = state.manifest_snapshot();
+        let mv = marshal::MiddleValue::Array(
+            entries
+                .iter()
+                .map(|e| {
+                    marshal::MiddleValue::Map(vec![
+                        ("name".to_owned(), marshal::MiddleValue::Str(e.name.clone())),
+                        (
+                            "types".to_owned(),
+                            e.types
+                                .clone()
+                                .map_or(marshal::MiddleValue::Null, marshal::MiddleValue::Str),
+                        ),
+                    ])
+                })
+                .collect(),
+        );
+        marshal::middle_to_zval(&mv, state).map_err(PhpException::default)
+    }
+
+    /// Generate a TypeScript `.d.ts` declaration for the `php` global from the
+    /// current manifest. Guests can author against these types; they are erased
+    /// at runtime (the host still validates at the boundary).
+    pub fn dts(&self) -> String {
+        manifest::to_dts(&self.engine.state.manifest_snapshot())
     }
 
     /// Grant JS access to a live PHP value (e.g. a database connection) as an
