@@ -10,12 +10,18 @@
 //! float/str/bin/array/map) — not serde's tagged-enum form — so a JS-side
 //! msgpack codec interoperates with it byte-for-byte.
 
+use crate::bridge::BridgeState;
+use crate::callback::JsCallback;
 use ext_php_rs::convert::IntoZval;
-use ext_php_rs::types::{ArrayKey, ZendHashTable, Zval};
-use rquickjs::{Array, Ctx, Object, TypedArray, Value};
+use ext_php_rs::types::{ArrayKey, ZendClassObject, ZendHashTable, Zval};
+use rquickjs::{Array, Ctx, Function, Object, TypedArray, Value};
 use serde::de::{Deserialize, Deserializer, MapAccess, SeqAccess, Visitor};
 use serde::ser::{Serialize, SerializeMap, SerializeSeq, Serializer};
 use std::fmt;
+
+/// Reserved msgpack-map keys tagging a function reference across the wire.
+const JSFN_TAG: &str = "$__jsfn";
+const PHPFN_TAG: &str = "$__phpfn";
 
 /// The neutral, self-describing value that bridges JS, PHP and the wire.
 #[derive(Debug, Clone, PartialEq)]
@@ -29,6 +35,10 @@ pub enum MiddleValue {
     Array(Vec<MiddleValue>),
     /// Insertion-ordered string-keyed map (matches JS object + PHP assoc array).
     Map(Vec<(String, MiddleValue)>),
+    /// A PHP callable handed to JS (id into the host-side registry).
+    PhpFn(u64),
+    /// A JS function handed to PHP (id into the JS-side registry).
+    JsFn(u64),
 }
 
 impl MiddleValue {
@@ -79,6 +89,17 @@ impl Serialize for MiddleValue {
                 for (k, v) in entries {
                     map.serialize_entry(k, v)?;
                 }
+                map.end()
+            }
+            // Function refs travel as single-entry tagged maps.
+            MiddleValue::PhpFn(id) => {
+                let mut map = s.serialize_map(Some(1))?;
+                map.serialize_entry(PHPFN_TAG, &(*id as i64))?;
+                map.end()
+            }
+            MiddleValue::JsFn(id) => {
+                let mut map = s.serialize_map(Some(1))?;
+                map.serialize_entry(JSFN_TAG, &(*id as i64))?;
                 map.end()
             }
         }
@@ -135,6 +156,17 @@ impl<'de> Deserialize<'de> for MiddleValue {
                 while let Some((k, v)) = map.next_entry::<MapKey, MiddleValue>()? {
                     out.push((k.0, v));
                 }
+                // A single-entry map keyed by a reserved tag is a function ref.
+                if out.len() == 1 {
+                    if let (key, MiddleValue::Int(id)) = &out[0] {
+                        if key == JSFN_TAG {
+                            return Ok(MiddleValue::JsFn(*id as u64));
+                        }
+                        if key == PHPFN_TAG {
+                            return Ok(MiddleValue::PhpFn(*id as u64));
+                        }
+                    }
+                }
                 Ok(MiddleValue::Map(out))
             }
         }
@@ -173,8 +205,13 @@ impl<'de> Deserialize<'de> for MapKey {
 // JS <-> MiddleValue
 // ---------------------------------------------------------------------------
 
-/// Convert a JS value into the neutral representation.
-pub fn js_to_middle<'js>(ctx: &Ctx<'js>, value: Value<'js>) -> rquickjs::Result<MiddleValue> {
+/// Convert a JS value into the neutral representation. Functions are registered
+/// in the JS-side registry and travel as a [`MiddleValue::JsFn`] ref.
+pub fn js_to_middle<'js>(
+    ctx: &Ctx<'js>,
+    value: Value<'js>,
+    _state: &BridgeState,
+) -> rquickjs::Result<MiddleValue> {
     if value.is_null() || value.is_undefined() {
         return Ok(MiddleValue::Null);
     }
@@ -190,6 +227,12 @@ pub fn js_to_middle<'js>(ctx: &Ctx<'js>, value: Value<'js>) -> rquickjs::Result<
     if let Some(s) = value.as_string() {
         return Ok(MiddleValue::Str(s.to_string()?));
     }
+    if value.is_function() {
+        // Register the function JS-side; PHP receives an opaque id.
+        let register: Function = ctx.globals().get("__registerJsFn")?;
+        let id: f64 = register.call((value.clone(),))?;
+        return Ok(MiddleValue::JsFn(id as u64));
+    }
     // Uint8Array -> Bytes (checked before the generic object branch).
     if value.is_object() {
         if let Ok(ta) = TypedArray::<u8>::from_value(value.clone()) {
@@ -202,22 +245,16 @@ pub fn js_to_middle<'js>(ctx: &Ctx<'js>, value: Value<'js>) -> rquickjs::Result<
         let arr = value.into_array().unwrap();
         let mut out = Vec::with_capacity(arr.len());
         for i in 0..arr.len() {
-            out.push(js_to_middle(ctx, arr.get(i)?)?);
+            out.push(js_to_middle(ctx, arr.get(i)?, _state)?);
         }
         return Ok(MiddleValue::Array(out));
-    }
-    if value.is_function() {
-        return Err(rquickjs::Exception::throw_type(
-            ctx,
-            "cannot marshal a JS function (function bridging not yet enabled)",
-        ));
     }
     if value.is_object() {
         let obj = value.into_object().unwrap();
         let mut out = Vec::new();
         for entry in obj.props::<String, Value>() {
             let (k, v) = entry?;
-            out.push((k, js_to_middle(ctx, v)?));
+            out.push((k, js_to_middle(ctx, v, _state)?));
         }
         return Ok(MiddleValue::Map(out));
     }
@@ -228,7 +265,11 @@ pub fn js_to_middle<'js>(ctx: &Ctx<'js>, value: Value<'js>) -> rquickjs::Result<
 }
 
 /// Convert the neutral representation into a JS value.
-pub fn middle_to_js<'js>(ctx: &Ctx<'js>, value: &MiddleValue) -> rquickjs::Result<Value<'js>> {
+pub fn middle_to_js<'js>(
+    ctx: &Ctx<'js>,
+    value: &MiddleValue,
+    _state: &BridgeState,
+) -> rquickjs::Result<Value<'js>> {
     Ok(match value {
         MiddleValue::Null => Value::new_null(ctx.clone()),
         MiddleValue::Bool(b) => Value::new_bool(ctx.clone(), *b),
@@ -246,16 +287,25 @@ pub fn middle_to_js<'js>(ctx: &Ctx<'js>, value: &MiddleValue) -> rquickjs::Resul
         MiddleValue::Array(items) => {
             let arr = Array::new(ctx.clone())?;
             for (i, it) in items.iter().enumerate() {
-                arr.set(i, middle_to_js(ctx, it)?)?;
+                arr.set(i, middle_to_js(ctx, it, _state)?)?;
             }
             arr.into_value()
         }
         MiddleValue::Map(entries) => {
             let obj = Object::new(ctx.clone())?;
             for (k, v) in entries {
-                obj.set(k.as_str(), middle_to_js(ctx, v)?)?;
+                obj.set(k.as_str(), middle_to_js(ctx, v, _state)?)?;
             }
             obj.into_value()
+        }
+        // Reconstruct callables from the JS-side helpers.
+        MiddleValue::JsFn(id) => {
+            let get: Function = ctx.globals().get("__getJsFn")?;
+            get.call((*id as f64,))?
+        }
+        MiddleValue::PhpFn(id) => {
+            let make: Function = ctx.globals().get("__makePhpFn")?;
+            make.call((*id as f64,))?
         }
     })
 }
@@ -264,8 +314,10 @@ pub fn middle_to_js<'js>(ctx: &Ctx<'js>, value: &MiddleValue) -> rquickjs::Resul
 // PHP Zval <-> MiddleValue
 // ---------------------------------------------------------------------------
 
-/// Convert a PHP value into the neutral representation.
-pub fn zval_to_middle(zv: &Zval) -> Result<MiddleValue, String> {
+/// Convert a PHP value into the neutral representation. A `Js\Callback` becomes
+/// a [`MiddleValue::JsFn`] ref; any other PHP callable is registered host-side
+/// as a [`MiddleValue::PhpFn`].
+pub fn zval_to_middle(zv: &Zval, state: &BridgeState) -> Result<MiddleValue, String> {
     if zv.is_null() {
         return Ok(MiddleValue::Null);
     }
@@ -289,20 +341,31 @@ pub fn zval_to_middle(zv: &Zval) -> Result<MiddleValue, String> {
     }
     if zv.is_array() {
         let ht = zv.array().unwrap();
-        return Ok(hashtable_to_middle(ht));
+        return hashtable_to_middle(ht, state);
+    }
+    // A returned Js\Callback maps back to its original JS function.
+    if zv.is_object() {
+        if let Some(cb) = zv.extract::<&ZendClassObject<JsCallback>>() {
+            return Ok(MiddleValue::JsFn(cb.id));
+        }
+    }
+    // Any other callable (closure, [obj, 'method'] is caught above as array) is
+    // registered host-side and handed to JS as a callable wrapper.
+    if zv.is_callable() {
+        return Ok(MiddleValue::PhpFn(state.register_php_fn(zv)));
     }
     Err("unsupported PHP value type for marshaling".to_owned())
 }
 
 /// A PHP array becomes an [`MiddleValue::Array`] when its keys are the
 /// sequential `0..n`, otherwise an insertion-ordered [`MiddleValue::Map`].
-fn hashtable_to_middle(ht: &ZendHashTable) -> MiddleValue {
+fn hashtable_to_middle(ht: &ZendHashTable, state: &BridgeState) -> Result<MiddleValue, String> {
     if ht.has_sequential_keys() {
         let mut out = Vec::with_capacity(ht.len());
         for (_, v) in ht.iter() {
-            out.push(zval_to_middle(v).unwrap_or(MiddleValue::Null));
+            out.push(zval_to_middle(v, state)?);
         }
-        MiddleValue::Array(out)
+        Ok(MiddleValue::Array(out))
     } else {
         let mut out = Vec::with_capacity(ht.len());
         for (k, v) in ht.iter() {
@@ -312,14 +375,14 @@ fn hashtable_to_middle(ht: &ZendHashTable) -> MiddleValue {
                 ArrayKey::Str(s) => s.to_owned(),
                 ArrayKey::ZendString(s) => s.try_into().unwrap_or_default(),
             };
-            out.push((key, zval_to_middle(v).unwrap_or(MiddleValue::Null)));
+            out.push((key, zval_to_middle(v, state)?));
         }
-        MiddleValue::Map(out)
+        Ok(MiddleValue::Map(out))
     }
 }
 
 /// Convert the neutral representation into a PHP value.
-pub fn middle_to_zval(value: &MiddleValue) -> Result<Zval, String> {
+pub fn middle_to_zval(value: &MiddleValue, state: &BridgeState) -> Result<Zval, String> {
     let mut zv = Zval::new();
     match value {
         MiddleValue::Null => zv.set_null(),
@@ -333,7 +396,7 @@ pub fn middle_to_zval(value: &MiddleValue) -> Result<Zval, String> {
         MiddleValue::Array(items) => {
             let mut ht = ZendHashTable::new();
             for it in items {
-                ht.push(middle_to_zval(it)?)
+                ht.push(middle_to_zval(it, state)?)
                     .map_err(|e| format!("array push failed: {e}"))?;
             }
             zv.set_hashtable(ht);
@@ -341,10 +404,26 @@ pub fn middle_to_zval(value: &MiddleValue) -> Result<Zval, String> {
         MiddleValue::Map(entries) => {
             let mut ht = ZendHashTable::new();
             for (k, v) in entries {
-                ht.insert(k.as_str(), middle_to_zval(v)?)
+                ht.insert(k.as_str(), middle_to_zval(v, state)?)
                     .map_err(|e| format!("map insert failed: {e}"))?;
             }
             zv.set_hashtable(ht);
+        }
+        // A PHP callable handed to JS and returned unchanged: original callable.
+        MiddleValue::PhpFn(id) => {
+            return state
+                .get_php_fn(*id)
+                .ok_or_else(|| format!("unknown PHP callable id {id}"));
+        }
+        // A JS function handed to PHP: an invocable Js\Callback object.
+        MiddleValue::JsFn(id) => {
+            let engine = state
+                .engine()
+                .ok_or("engine no longer available for JS callback")?;
+            let cb = JsCallback::new(*id, engine);
+            return ZendClassObject::new(cb)
+                .into_zval(false)
+                .map_err(|e| format!("failed to build Js\\Callback: {e}"));
         }
     }
     Ok(zv)

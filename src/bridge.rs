@@ -7,17 +7,19 @@
 //! callable, and returns the msgpack-encoded result. Adding a capability never
 //! changes this ABI.
 
+use crate::engine::{pop_ctx, push_ctx, Engine};
 use crate::manifest::ManifestEntry;
 use crate::marshal::{middle_to_zval, zval_to_middle, MiddleValue};
 use ext_php_rs::convert::IntoZvalDyn;
 use ext_php_rs::types::{ZendCallable, Zval};
-use rquickjs::{Ctx, Exception, TypedArray, Value};
-use std::cell::RefCell;
+use rquickjs::{Ctx, Exception, Function, TypedArray, Value};
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
-use std::rc::Rc;
+use std::rc::{Rc, Weak};
 
-/// The msgpack codec injected into every sandbox context.
+/// The msgpack codec and runtime support injected into every sandbox context.
 const MSGPACK_JS: &str = include_str!("js/msgpack.js");
+const RUNTIME_JS: &str = include_str!("js/runtime.js");
 
 /// Shared host-side state behind the bridge. Single-threaded (PHP NTS), so
 /// `Rc`/`RefCell` interior mutability is sufficient and correct.
@@ -27,6 +29,11 @@ pub struct BridgeState {
     dispatch: RefCell<HashMap<String, Zval>>,
     /// Ordered registration manifest (drives the facade and the `.d.ts`).
     manifest: RefCell<Vec<ManifestEntry>>,
+    /// Anonymous PHP callables handed to JS, keyed by id.
+    php_funcs: RefCell<HashMap<u64, Zval>>,
+    next_php: Cell<u64>,
+    /// Back-reference to the owning engine (for invoking JS callbacks).
+    engine: RefCell<Weak<Engine>>,
 }
 
 impl BridgeState {
@@ -34,8 +41,21 @@ impl BridgeState {
         Rc::new(Self::default())
     }
 
+    pub fn set_engine(&self, engine: Weak<Engine>) {
+        *self.engine.borrow_mut() = engine;
+    }
+
+    pub fn engine(&self) -> Option<Rc<Engine>> {
+        self.engine.borrow().upgrade()
+    }
+
     /// Register a PHP callable under a flat, dotted name.
-    pub fn register(&self, name: String, callable: &Zval, types: Option<String>) -> Result<(), String> {
+    pub fn register(
+        &self,
+        name: String,
+        callable: &Zval,
+        types: Option<String>,
+    ) -> Result<(), String> {
         if !callable.is_callable() {
             return Err(format!("value registered as '{name}' is not callable"));
         }
@@ -43,13 +63,26 @@ impl BridgeState {
             .borrow_mut()
             .insert(name.clone(), callable.shallow_clone());
         let mut manifest = self.manifest.borrow_mut();
-        // Replace an existing entry with the same name, else append.
         if let Some(existing) = manifest.iter_mut().find(|e| e.name == name) {
             existing.types = types;
         } else {
             manifest.push(ManifestEntry { name, types });
         }
         Ok(())
+    }
+
+    /// Register an anonymous PHP callable (handed to JS), returning its id.
+    pub fn register_php_fn(&self, callable: &Zval) -> u64 {
+        let id = self.next_php.get() + 1;
+        self.next_php.set(id);
+        self.php_funcs
+            .borrow_mut()
+            .insert(id, callable.shallow_clone());
+        id
+    }
+
+    pub fn get_php_fn(&self, id: u64) -> Option<Zval> {
+        self.php_funcs.borrow().get(&id).map(Zval::shallow_clone)
     }
 
     pub fn manifest_snapshot(&self) -> Vec<ManifestEntry> {
@@ -61,61 +94,106 @@ impl BridgeState {
     }
 }
 
-/// Dispatch a host call: resolve the name, marshal args to PHP, invoke, and
-/// marshal the result back. Returns `Err(message)` for an unknown capability
-/// or a failed call (refined into typed JS errors in a later step).
-fn host_call(state: &BridgeState, name: &str, args: Vec<MiddleValue>) -> Result<MiddleValue, String> {
-    let dispatch = state.dispatch.borrow();
-    let callable_zv = dispatch
-        .get(name)
-        .ok_or_else(|| format!("unknown capability: {name}"))?;
-
+/// Invoke a PHP callable with already-marshaled args, returning its result.
+fn call_php(callable_zv: &Zval, args: &[MiddleValue], state: &BridgeState) -> Result<MiddleValue, String> {
     let zvals: Vec<Zval> = args
         .iter()
-        .map(middle_to_zval)
+        .map(|m| middle_to_zval(m, state))
         .collect::<Result<_, _>>()?;
     let params: Vec<&dyn IntoZvalDyn> = zvals.iter().map(|z| z as &dyn IntoZvalDyn).collect();
 
     let callable = ZendCallable::new(callable_zv).map_err(|e| e.to_string())?;
-    let ret = callable.try_call(params).map_err(|e| e.to_string())?;
-    zval_to_middle(&ret)
+    let ret = callable
+        .try_call(params)
+        .map_err(crate::error::php_error_message)?;
+    zval_to_middle(&ret, state)
 }
 
-/// Install the bridge into a context: the `__host` native import, the msgpack
-/// codec, and the frozen `php.*` facade. Call once per `eval`, before guest
-/// code runs.
+/// Dispatch a named host call. Returns `Err(message)` for an unknown capability
+/// or a failed call.
+fn host_call(state: &BridgeState, name: &str, args: Vec<MiddleValue>) -> Result<MiddleValue, String> {
+    let callable_zv = state
+        .dispatch
+        .borrow()
+        .get(name)
+        .map(Zval::shallow_clone)
+        .ok_or_else(|| format!("unknown capability: {name}"))?;
+    call_php(&callable_zv, &args, state)
+}
+
+/// Invoke an anonymous PHP callable (one previously handed to JS) by id.
+fn php_fn_call(state: &BridgeState, id: u64, args: Vec<MiddleValue>) -> Result<MiddleValue, String> {
+    let callable_zv = state
+        .get_php_fn(id)
+        .ok_or_else(|| format!("unknown PHP callable id {id}"))?;
+    call_php(&callable_zv, &args, state)
+}
+
+/// Decode the msgpack arg payload from a host import into a list of values.
+fn decode_args(bytes: &[u8]) -> Result<Vec<MiddleValue>, String> {
+    match MiddleValue::from_msgpack(bytes).map_err(|e| e.to_string())? {
+        MiddleValue::Array(a) => Ok(a),
+        other => Ok(vec![other]),
+    }
+}
+
+/// Encode a host result back to a msgpack `Uint8Array` for JS.
+fn encode_result<'js>(ctx: &Ctx<'js>, result: MiddleValue) -> rquickjs::Result<Value<'js>> {
+    let out = result
+        .to_msgpack()
+        .map_err(|e| Exception::throw_type(ctx, &format!("encode failed: {e}")))?;
+    Ok(TypedArray::new(ctx.clone(), out)?.into_value())
+}
+
+/// Install the bridge into a context: the `__host`/`__php_invoke` native
+/// imports, the msgpack codec, the runtime support, and the frozen `php.*`
+/// facade. Call once per `eval`, before guest code runs.
 pub fn install<'js>(ctx: &Ctx<'js>, state: Rc<BridgeState>) -> rquickjs::Result<()> {
     let globals = ctx.globals();
 
-    // The single JS -> host entry point.
+    // The single JS -> host capability entry point.
     let host_state = state.clone();
-    let host = rquickjs::Function::new(
+    let host = Function::new(
         ctx.clone(),
         move |ctx: Ctx<'js>, name: String, args_bytes: TypedArray<'js, u8>| -> rquickjs::Result<Value<'js>> {
             let bytes = args_bytes
                 .as_bytes()
                 .ok_or_else(|| Exception::throw_type(&ctx, "__host args must be a Uint8Array"))?;
-            let decoded = MiddleValue::from_msgpack(bytes)
-                .map_err(|e| Exception::throw_type(&ctx, &format!("invalid msgpack payload: {e}")))?;
-            let args = match decoded {
-                MiddleValue::Array(a) => a,
-                other => vec![other],
-            };
-            match host_call(&host_state, &name, args) {
-                Ok(result) => {
-                    let out = result
-                        .to_msgpack()
-                        .map_err(|e| Exception::throw_type(&ctx, &format!("encode failed: {e}")))?;
-                    Ok(TypedArray::new(ctx.clone(), out)?.into_value())
-                }
+            let args = decode_args(bytes).map_err(|e| Exception::throw_type(&ctx, &e))?;
+            push_ctx(&ctx);
+            let result = host_call(&host_state, &name, args);
+            pop_ctx();
+            match result {
+                Ok(r) => encode_result(&ctx, r),
                 Err(msg) => Err(Exception::throw_message(&ctx, &msg)),
             }
         },
     )?;
     globals.set("__host", host)?;
 
-    // The msgpack codec, then the frozen facade.
+    // JS -> host: invoke an anonymous PHP callable handed to JS earlier.
+    let php_state = state.clone();
+    let php_invoke = Function::new(
+        ctx.clone(),
+        move |ctx: Ctx<'js>, id: f64, args_bytes: TypedArray<'js, u8>| -> rquickjs::Result<Value<'js>> {
+            let bytes = args_bytes
+                .as_bytes()
+                .ok_or_else(|| Exception::throw_type(&ctx, "__php_invoke args must be a Uint8Array"))?;
+            let args = decode_args(bytes).map_err(|e| Exception::throw_type(&ctx, &e))?;
+            push_ctx(&ctx);
+            let result = php_fn_call(&php_state, id as u64, args);
+            pop_ctx();
+            match result {
+                Ok(r) => encode_result(&ctx, r),
+                Err(msg) => Err(Exception::throw_message(&ctx, &msg)),
+            }
+        },
+    )?;
+    globals.set("__php_invoke", php_invoke)?;
+
+    // Codec, runtime support, then the frozen facade.
     ctx.eval::<(), _>(MSGPACK_JS)?;
+    ctx.eval::<(), _>(RUNTIME_JS)?;
     ctx.eval::<(), _>(build_facade(&state.names()))?;
     Ok(())
 }
@@ -124,14 +202,11 @@ pub fn install<'js>(ctx: &Ctx<'js>, state: Rc<BridgeState>) -> rquickjs::Result<
 fn build_facade(names: &[String]) -> String {
     let mut src = String::from(
         "(function(){\n\
-         var host = globalThis.__host, mp = globalThis.__mp;\n\
-         function call(name, args){ return mp.decode(host(name, mp.encode(args))); }\n\
          var php = {};\n",
     );
 
     for name in names {
         let parts: Vec<&str> = name.split('.').collect();
-        // Ensure each intermediate namespace object exists.
         let mut path = String::from("php");
         for part in &parts[..parts.len() - 1] {
             let next = format!("{path}[{}]", js_string(part));
@@ -140,7 +215,7 @@ fn build_facade(names: &[String]) -> String {
         }
         let leaf = format!("{path}[{}]", js_string(parts[parts.len() - 1]));
         src.push_str(&format!(
-            "{leaf} = function(){{ return call({}, Array.prototype.slice.call(arguments)); }};\n",
+            "{leaf} = function(){{ return globalThis.__rt.callHost({}, Array.prototype.slice.call(arguments)); }};\n",
             js_string(name)
         ));
     }
@@ -167,7 +242,7 @@ mod tests {
         let src = build_facade(&["db.query".into(), "log.info".into()]);
         assert!(src.contains("php[\"db\"] = php[\"db\"] || {};"));
         assert!(src.contains("php[\"db\"][\"query\"] = function()"));
-        assert!(src.contains("call(\"db.query\""));
+        assert!(src.contains("callHost(\"db.query\""));
         assert!(src.contains("Object.freeze"));
     }
 }
