@@ -279,7 +279,13 @@ pub fn zval_to_middle(zv: &Zval) -> Result<MiddleValue, String> {
         return Ok(MiddleValue::Float(zv.double().unwrap()));
     }
     if zv.is_string() {
-        return Ok(MiddleValue::Str(zv.string().unwrap_or_default()));
+        // PHP strings are byte strings. Preserve valid UTF-8 as a string;
+        // anything else (binary data) crosses as bytes -> JS Uint8Array.
+        let bytes = zv.zend_str().map(|zs| zs.as_bytes()).unwrap_or(&[]);
+        return Ok(match std::str::from_utf8(bytes) {
+            Ok(s) => MiddleValue::Str(s.to_owned()),
+            Err(_) => MiddleValue::Bytes(bytes.to_owned()),
+        });
     }
     if zv.is_array() {
         let ht = zv.array().unwrap();
