@@ -10,9 +10,10 @@ mod exceptions;
 mod handles;
 mod manifest;
 mod marshal;
+mod sandbox;
 
 use engine::Engine;
-use exceptions::QuickJSEvalException;
+use exceptions::{QuickJSEvalException, QuickJSMemoryException, QuickJSTimeoutException};
 use marshal::{js_to_middle, middle_to_js, middle_to_zval, zval_to_middle};
 
 /// An embedded QuickJS sandbox with a typed, bidirectional PHP bridge.
@@ -24,8 +25,24 @@ pub struct QuickJS {
 
 #[php_impl]
 impl QuickJS {
-    pub fn __construct() -> PhpResult<Self> {
-        let engine = Engine::new().map_err(to_php_err)?;
+    /// Construct a sandbox. All limits default to unbounded; pass non-zero
+    /// values to contain resource abuse:
+    /// - `memory_limit`: max heap bytes (alloc-bomb guard)
+    /// - `timeout_ms`: wall-clock budget per `eval` (infinite-loop guard)
+    /// - `max_stack`: max native stack bytes
+    #[allow(non_snake_case)]
+    #[php(defaults(memoryLimit = None, timeoutMs = None, maxStack = None))]
+    pub fn __construct(
+        memoryLimit: Option<i64>,
+        timeoutMs: Option<i64>,
+        maxStack: Option<i64>,
+    ) -> PhpResult<Self> {
+        let engine = Engine::new(
+            memoryLimit.unwrap_or(0).max(0) as usize,
+            timeoutMs.unwrap_or(0).max(0) as u64,
+            maxStack.unwrap_or(0).max(0) as usize,
+        )
+        .map_err(to_php_err)?;
         Ok(QuickJS { engine })
     }
 
@@ -48,15 +65,16 @@ impl QuickJS {
     /// `php.*` facade is installed fresh from the current manifest first.
     pub fn eval(&self, code: String) -> PhpResult<Zval> {
         let state = self.engine.state.clone();
-        self.engine.ctx.with(|ctx| {
-            let eval_err = |e| {
-                PhpException::from_class::<QuickJSEvalException>(error::js_error_message(&ctx, e))
-            };
-            bridge::install(&ctx, state.clone()).map_err(eval_err)?;
-            let value: rquickjs::Value = ctx.eval(code).map_err(eval_err)?;
-            let middle = js_to_middle(&ctx, value, &state).map_err(eval_err)?;
+        self.engine.arm_deadline();
+        let result = self.engine.ctx.with(|ctx| {
+            let eval_err = |e| self.classify_js_error(&ctx, e);
+            bridge::install(&ctx, state.clone()).map_err(&eval_err)?;
+            let value: rquickjs::Value = ctx.eval(code).map_err(&eval_err)?;
+            let middle = js_to_middle(&ctx, value, &state).map_err(&eval_err)?;
             middle_to_zval(&middle, &state).map_err(PhpException::default)
-        })
+        });
+        self.engine.disarm_deadline();
+        result
     }
 
     /// Grant JS access to a live PHP value (e.g. a database connection) as an
@@ -95,6 +113,21 @@ impl QuickJS {
             let back = js_to_middle(&ctx, js, &state).map_err(to_php_err)?;
             middle_to_zval(&back, &state).map_err(PhpException::default)
         })
+    }
+}
+
+impl QuickJS {
+    /// Map a JS-side failure to the most specific PHP exception class: timeout
+    /// (deadline tripped), memory (heap limit), else a generic eval error.
+    fn classify_js_error(&self, ctx: &rquickjs::Ctx<'_>, err: rquickjs::Error) -> PhpException {
+        let msg = error::js_error_message(ctx, err);
+        if self.engine.timed_out() {
+            PhpException::from_class::<QuickJSTimeoutException>(msg)
+        } else if msg.to_lowercase().contains("out of memory") {
+            PhpException::from_class::<QuickJSMemoryException>(msg)
+        } else {
+            PhpException::from_class::<QuickJSEvalException>(msg)
+        }
     }
 }
 
