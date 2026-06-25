@@ -1,0 +1,28 @@
+[package]
+name = "php_quickjs"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.94"
+description = "Embed a QuickJS sandbox in PHP with typed, bidirectional communication"
+license = "MIT"
+
+[lib]
+name = "php_quickjs"
+crate-type = ["cdylib"]
+
+[dependencies]
+ext-php-rs = { version = "0.15", features = ["closure"] }
+rquickjs = { version = "0.12", default-features = false, features = [
+    "macro",
+    "classes",
+    "array-buffer",
+] }
+serde = { version = "1", features = ["derive"] }
+serde_bytes = "0.11"
+rmp-serde = "1"
+serde_json = "1"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+panic = "unwind"
