@@ -6,6 +6,7 @@ mod bridge;
 mod callback;
 mod engine;
 mod error;
+mod handles;
 mod manifest;
 mod marshal;
 
@@ -53,6 +54,29 @@ impl QuickJS {
             let middle = js_to_middle(&ctx, value, &state).map_err(to_php_err)?;
             middle_to_zval(&middle, &state).map_err(PhpException::default)
         })
+    }
+
+    /// Grant JS access to a live PHP value (e.g. a database connection) as an
+    /// opaque integer handle. The value is kept host-side; JS only ever sees
+    /// the id and must pass it back to a capability to use it.
+    pub fn grant(&self, resource: &Zval) -> i64 {
+        self.engine.state.handles.grant(resource)
+    }
+
+    /// Resolve a handle previously returned by `grant()` back to its live PHP
+    /// value. Throws if the handle is unknown (e.g. already revoked).
+    pub fn resolve(&self, handle: i64) -> PhpResult<Zval> {
+        self.engine
+            .state
+            .handles
+            .resolve(handle)
+            .ok_or_else(|| PhpException::default(format!("unknown handle: {handle}")))
+    }
+
+    /// Revoke a handle, releasing the host-side reference. Returns whether the
+    /// handle existed.
+    pub fn revoke(&self, handle: i64) -> bool {
+        self.engine.state.handles.revoke(handle)
     }
 
     /// Round-trip a PHP value through the JS engine and back, exercising every

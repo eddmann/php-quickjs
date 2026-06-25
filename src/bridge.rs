@@ -8,6 +8,7 @@
 //! changes this ABI.
 
 use crate::engine::{pop_ctx, push_ctx, Engine};
+use crate::handles::HandleTable;
 use crate::manifest::ManifestEntry;
 use crate::marshal::{middle_to_zval, zval_to_middle, MiddleValue};
 use ext_php_rs::convert::IntoZvalDyn;
@@ -32,6 +33,8 @@ pub struct BridgeState {
     /// Anonymous PHP callables handed to JS, keyed by id.
     php_funcs: RefCell<HashMap<u64, Zval>>,
     next_php: Cell<u64>,
+    /// Live PHP objects granted to JS as opaque handles.
+    pub handles: HandleTable,
     /// Back-reference to the owning engine (for invoking JS callbacks).
     engine: RefCell<Weak<Engine>>,
 }
