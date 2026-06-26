@@ -1678,7 +1678,7 @@ dependencies = [
 
 [[package]]
 name = "php_quickjs"
-version = "0.1.0"
+version = "0.0.2"
 dependencies = [
  "ext-php-rs",
  "lru",
