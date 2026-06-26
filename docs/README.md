@@ -30,8 +30,9 @@ php -d extension=$(pwd)/target/debug/libphp_quickjs.so examples/kitchen_sink.php
 
 | File | Responsibility |
 |------|----------------|
-| `src/lib.rs` | The `QuickJS` PHP class: `eval` / `register` / `grant` / `resolve` / `revoke` / `manifest` / `dts`. |
+| `src/lib.rs` | The `QuickJS` PHP class: `eval` / `register` / `grant` / `resolve` / `revoke` / `manifest` / `dts` / `roundtrip`. |
 | `src/engine.rs` | Owns the QuickJS `Runtime`; realm lifecycle (shared vs isolated); deadline + re-entrancy state; the current-context stack. |
+| `src/sandbox.rs` | In-engine resource containment: the memory limit, native stack size, and wall-clock deadline (interrupt handler). |
 | `src/transpile.rs` | TypeScript → JavaScript via oxc, plus the content-hash transpile cache. |
 | `src/bridge.rs` | The `__host` / `__php_invoke` imports, the dispatch table, the frozen `php.*` facade, and registries. |
 | `src/marshal.rs` | `JS value ↔ MiddleValue ↔ PHP zval`, with native-msgpack (de)serialization. |

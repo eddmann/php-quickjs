@@ -75,7 +75,7 @@ error rather than misbehaving:
 $held = null;
 $js->register('keep', function ($cb) use (&$held) { $held = $cb; });
 $js->eval('php.keep(() => 1)');
-$held();   // QuickJSException: "JS callback invoked outside its eval (isolated …)"
+$held();   // Exception: "JS callback invoked outside its eval (isolated …)"
 ```
 
 ## Why exactly those differences (the mechanism)

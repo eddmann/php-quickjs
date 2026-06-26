@@ -2,7 +2,7 @@
 name = "php_quickjs"
 version = "0.0.2"
 edition = "2021"
-rust-version = "1.94"
+rust-version = "1.96"
 description = "Embed a QuickJS sandbox in PHP with typed, bidirectional communication"
 license = "MIT"
 authors = ["Edd Mann <the@eddmann.com>"]

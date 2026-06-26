@@ -37,3 +37,9 @@ $js->register('db.query', fn(int $handle, string $sql) => $js->resolve($handle)-
 
 The registration manifest and a generated TypeScript `.d.ts` for the `php` global,
 both from the same source of truth.
+
+### `roundtrip(mixed $value): mixed`
+
+Diagnostic helper: send a PHP value through the full marshaling pipeline
+(PHP → MiddleValue → JS → MiddleValue → PHP) and return the result. Useful for
+testing value fidelity across the boundary; not needed in normal use.

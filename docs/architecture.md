@@ -29,10 +29,12 @@ Take `php.math.add(2, 3)` from a guest script.
 
 2. The guest calls `php.math.add(2, 3)`. `php` is not magic — it is a **frozen JS
    object tree** that `bridge.rs` generated from the registration manifest. The
-   leaf `php.math.add` is an arrow function:
+   leaf `php.math.add` is a function:
 
    ```js
-   php.math.add = (...args) => globalThis.__rt.callHost("math.add", args);
+   php.math.add = function () {
+     return globalThis.__rt.callHost("math.add", Array.prototype.slice.call(arguments));
+   };
    ```
 
 3. `__rt.callHost` (`src/js/runtime.js`) **msgpack-encodes** the argument array
@@ -56,7 +58,7 @@ surface.
 ### The facade is generated, and frozen
 
 `bridge.rs::build_facade` walks the manifest's dotted names into a nested object
-tree, makes each leaf an arrow calling `__rt.callHost("dotted.name", args)`, then
+tree, makes each leaf a function calling `__rt.callHost("dotted.name", args)`, then
 **deep-freezes** the whole tree. Freezing is a security requirement, not a
 nicety: a guest must not be able to reassign `php.http.get` to fool other code.
 The facade is (re)built at the start of every `eval` so newly registered
@@ -123,7 +125,7 @@ while a host call is already running* (e.g. `php.mapEach(xs, fn)` — PHP calls
 eval) is active, the live `Ctx` pointer is published on a thread-local
 **current-context stack** (`engine.rs`), and `Js\Callback` reuses it instead of
 re-locking. Only when invoked *between* evals (no realm active) does it acquire
-the lock fresh on the persistent realm. A re-entrancy **depth cap** bounds
+the lock fresh on the persistent realm. A re-entrancy **depth cap** (200) bounds
 runaway PHP→JS→PHP→… recursion.
 
 ## Capability handles
