@@ -2,6 +2,7 @@
 
 use crate::bridge::BridgeState;
 use crate::sandbox;
+use crate::transpile::TranspileCache;
 use rquickjs::{Context, Ctx, Runtime};
 use std::cell::Cell;
 use std::ptr::NonNull;
@@ -17,6 +18,8 @@ pub struct Engine {
     pub rt: Runtime,
     pub ctx: Context,
     pub state: Rc<BridgeState>,
+    /// Content-addressed TS->JS transpile cache (source maps kept host-side).
+    pub transpile: TranspileCache,
     depth: Cell<usize>,
     /// Per-eval wall-clock deadline; `None` when no eval is in flight.
     deadline: Rc<Cell<Option<Instant>>>,
@@ -40,6 +43,7 @@ impl Engine {
             rt,
             ctx,
             state: state.clone(),
+            transpile: TranspileCache::new(256),
             depth: Cell::new(0),
             deadline,
             timed_out,

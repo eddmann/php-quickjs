@@ -16,6 +16,7 @@ mod handles;
 mod manifest;
 mod marshal;
 mod sandbox;
+mod transpile;
 
 use engine::Engine;
 use exceptions::{QuickJSEvalException, QuickJSMemoryException, QuickJSTimeoutException};
@@ -68,12 +69,27 @@ impl QuickJS {
     /// Evaluate JS source and marshal the result back to a PHP value. The
     /// `php.*` facade is installed fresh from the current manifest first.
     pub fn eval(&self, code: String) -> PhpResult<Zval> {
+        // TypeScript fast path: transpile to JS (types erased, esnext) before
+        // QuickJS ever sees the source. Transpile/syntax errors surface here.
+        let module = self
+            .engine
+            .transpile
+            .get_or_transpile(&code)
+            .map_err(PhpException::from_class::<QuickJSEvalException>)?;
+
         let state = self.engine.state.clone();
         self.engine.arm_deadline();
         let result = self.engine.ctx.with(|ctx| {
-            let eval_err = |e| self.classify_js_error(&ctx, e);
+            let map = module.map_json.clone();
+            let eval_err =
+                |e| self.classify_js_error(&ctx, e, map.as_deref(), &module.module_id);
             bridge::install(&ctx, state.clone()).map_err(&eval_err)?;
-            let value: rquickjs::Value = ctx.eval(code).map_err(&eval_err)?;
+            // Name the module so stack frames are attributable and remappable.
+            let mut opts = rquickjs::context::EvalOptions::default();
+            opts.filename = Some(module.module_id.clone());
+            let value: rquickjs::Value = ctx
+                .eval_with_options(module.js.as_bytes(), opts)
+                .map_err(&eval_err)?;
             let middle = js_to_middle(&ctx, value, &state).map_err(&eval_err)?;
             middle_to_zval(&middle, &state).map_err(PhpException::default)
         });
@@ -152,16 +168,34 @@ impl QuickJS {
 
 impl QuickJS {
     /// Map a JS-side failure to the most specific PHP exception class: timeout
-    /// (deadline tripped), memory (heap limit), else a generic eval error.
-    fn classify_js_error(&self, ctx: &rquickjs::Ctx<'_>, err: rquickjs::Error) -> PhpException {
-        let msg = error::js_error_message(ctx, err);
+    /// (deadline tripped), memory (heap limit), else a generic eval error. For
+    /// the eval case the JS stack is remapped to TypeScript coordinates via the
+    /// module's source map and surfaced in the message.
+    fn classify_js_error(
+        &self,
+        ctx: &rquickjs::Ctx<'_>,
+        err: rquickjs::Error,
+        map_json: Option<&str>,
+        module_id: &str,
+    ) -> PhpException {
+        let (msg, stack) = error::js_error_detail(ctx, err);
         if self.engine.timed_out() {
-            PhpException::from_class::<QuickJSTimeoutException>(msg)
-        } else if msg.to_lowercase().contains("out of memory") {
-            PhpException::from_class::<QuickJSMemoryException>(msg)
-        } else {
-            PhpException::from_class::<QuickJSEvalException>(msg)
+            return PhpException::from_class::<QuickJSTimeoutException>(msg);
         }
+        if msg.to_lowercase().contains("out of memory") {
+            return PhpException::from_class::<QuickJSMemoryException>(msg);
+        }
+        // Remap the guest stack from generated-JS back to TypeScript coordinates.
+        let mut full = msg;
+        if let (Some(stack), Some(map)) = (stack, map_json) {
+            if let Some(remapped) = error::remap_stack(&stack, map, module_id) {
+                if let Some((line, col)) = error::top_frame_location(&remapped, module_id) {
+                    full = format!("{full} ({module_id}:{line}:{col})");
+                }
+                full = format!("{full}\n{remapped}");
+            }
+        }
+        PhpException::from_class::<QuickJSEvalException>(full)
     }
 }
 

@@ -13,6 +13,7 @@ crate-type = ["cdylib"]
 [dependencies]
 ext-php-rs = { version = "0.15", features = ["closure"] }
 rquickjs = { version = "0.12", default-features = false, features = [
+    "std",
     "macro",
     "classes",
     "array-buffer",
@@ -21,6 +22,11 @@ serde = { version = "1", features = ["derive"] }
 serde_bytes = "0.11"
 rmp-serde = "1"
 serde_json = "1"
+
+# TypeScript fast path: transpile guest TS -> JS in-process, remap errors.
+oxc = { version = "0.137", features = ["full"] }
+sourcemap = "9"
+lru = "0.12"
 
 [profile.release]
 opt-level = 3

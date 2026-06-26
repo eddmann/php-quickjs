@@ -18,16 +18,17 @@ throws(fn() => $js->eval('throw new Error("boom")'), 'QuickJSEvalException', 'JS
 throws(fn() => $js->eval('null.field'), 'QuickJSException', 'JS runtime error is a QuickJSException');
 throws(fn() => $js->eval('this is not valid js'), 'QuickJSException', 'JS syntax error is a QuickJSException');
 
-// The PHP message carries the JS error name + message (no redundant prefix).
+// The PHP message starts with the JS error name + message (no redundant
+// prefix); a remapped TS location is appended (see 09_typescript.php).
 try {
     $js->eval('throw new TypeError("bad arg")');
 } catch (QuickJSException $e) {
-    eq('TypeError: bad arg', $e->getMessage(), 'typed JS error message preserved');
+    ok(str_starts_with($e->getMessage(), 'TypeError: bad arg'), 'typed JS error message preserved');
 }
 try {
     $js->eval('throw new Error("plain")');
 } catch (QuickJSException $e) {
-    eq('plain', $e->getMessage(), 'bare Error name elided from message');
+    ok(str_starts_with($e->getMessage(), 'plain'), 'bare Error name elided from message');
 }
 
 // --- PHP throw inside a callback -> JS -----------------------------------
@@ -46,7 +47,7 @@ eq('RuntimeException', $js->eval('(() => {
 try {
     $js->eval('php.boom()');
 } catch (QuickJSException $e) {
-    eq('RuntimeException: kaboom', $e->getMessage(), 'uncaught PHP exception re-surfaces cleanly');
+    ok(str_starts_with($e->getMessage(), 'RuntimeException: kaboom'), 'uncaught PHP exception re-surfaces cleanly');
 }
 
 // --- PHP exception thrown through a JS callback (Direction 2) -------------

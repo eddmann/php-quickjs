@@ -1,2 +1,3 @@
 [toolchain]
-channel = "1.94"
+# 1.96+ required: oxc 0.137 uses stabilized `if let` guards.
+channel = "1.96"

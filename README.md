@@ -6,9 +6,13 @@ isolated context, exposes a controlled allowlist of PHP capabilities into JS as 
 frozen, namespaced `php.module.fn()` SDK, and JS can call back into PHP
 mid-execution.
 
+Guest code may be **TypeScript**: it is transpiled to JavaScript in-process with
+[`oxc`](https://github.com/oxc-project/oxc) before QuickJS ever sees it, and
+runtime errors are mapped back to the original TS line/column.
+
 Written in Rust using [`ext-php-rs`](https://github.com/davidcole1340/ext-php-rs)
-(Zend side) and [`rquickjs`](https://github.com/DelSkayn/rquickjs) (QuickJS-NG is
-bundled — no system library needed).
+(Zend side), [`rquickjs`](https://github.com/DelSkayn/rquickjs) (QuickJS-NG is
+bundled — no system library needed), and `oxc` for the TypeScript fast path.
 
 > **Scope.** This is an *embedder*, not a security boundary against hostile code
 > on its own. The capability model contains *what JS can reach*; the memory/CPU
@@ -34,8 +38,8 @@ JS);
 
 ## Building
 
-Requires Rust (1.94+), clang, and the PHP dev headers (`php-config`, `phpize`).
-The extension is a plain cargo `cdylib` — no `phpize` step.
+Requires Rust (1.96+, for oxc), clang, and the PHP dev headers (`php-config`,
+`phpize`). The extension is a plain cargo `cdylib` — no `phpize` step.
 
 ```sh
 make build                 # debug -> target/debug/libphp_quickjs.so
@@ -59,8 +63,11 @@ signature surfaced by `dts()`. The dotted-name registry is the **entire** trust
 boundary — flat and greppable.
 
 ### `eval(string $code): mixed`
-Run JS and marshal the result back. The frozen `php.*` facade is (re)built from
-the current manifest before the guest runs.
+Run **TypeScript or JavaScript** and marshal the result back. The source is
+transpiled to JS with oxc (types erased, esnext target) before QuickJS sees it;
+the frozen `php.*` facade is (re)built from the current manifest before the guest
+runs. Runtime errors raise a `QuickJSEvalException` whose message and stack are
+remapped to the original TS line/column. See [TypeScript](#typescript) below.
 
 ### `grant(mixed $resource): int` / `resolve(int $h): mixed` / `revoke(int $h): bool`
 Capability handles for live, stateful objects (DB connections, file handles).
@@ -101,6 +108,45 @@ PHP (trusted)  ──ext-php-rs──►  Rust bridge  ──rquickjs──►  
   `QuickJSEvalException` (or `QuickJSTimeoutException` / `QuickJSMemoryException`);
   a PHP exception inside a callback becomes a JS `Error` exposing `e.phpClass`.
 
+## TypeScript
+
+`eval()` accepts TypeScript. The fast path — the Bun model — is transpile-and-go,
+**no type-checking on the hot path**:
+
+```
+eval(tsSource)
+  ├─ oxc transform  → js + source map   (types erased, esnext target)
+  │     cache: hash(source) → (js, map)  — the map stays host-side
+  ├─ rquickjs runs the JS (QuickJS only ever sees JS)
+  └─ on throw → remap stack JS→TS coords → QuickJSEvalException
+```
+
+- **Always transpile.** Plain JS is valid TS, so it round-trips unchanged. The
+  content-hash LRU cache makes re-running the same guest free.
+- **esnext target.** A near-identity transform — just strip types. QuickJS-NG
+  natively supports private fields, nullish, optional chaining, etc., so nothing
+  is downleveled and source maps stay tight.
+- **Erasable-only.** Type annotations, `interface`, `type`, generics and `as`
+  casts erase cleanly (isolatedModules semantics). TS that emits *runtime* code
+  (plain `enum`, legacy decorators, namespaces) is not part of the supported
+  subset.
+- **Errors map back to TS.** A guest throw is reported at its original TS
+  line/column even when type erasure shifted the generated JS:
+
+  ```php
+  try {
+      $js->eval("interface Foo { a: number }\n\nthrow new Error('boom');");
+  } catch (QuickJSEvalException $e) {
+      echo $e->getMessage();   // "boom (guest.ts:3:7)\n    at <eval> (guest.ts:3:7)"
+  }
+  ```
+
+- **Source maps never enter the sandbox** — they are kept host-side, keyed by
+  content hash, and used only when remapping an error.
+
+Type-*checking* (e.g. a bundled `tsgo`) is intentionally absent and can be slotted
+in later without reshaping this pipeline.
+
 ## Value marshaling
 
 | JS                 | PHP                        |
@@ -140,7 +186,8 @@ src/marshal.rs    MiddleValue <-> JS / PHP, native-msgpack serde
 src/callback.rs   Js\Callback (JS function -> PHP)
 src/handles.rs    capability handle table
 src/sandbox.rs    memory/stack limits + wall-clock interrupt
-src/error.rs      exception bridging both ways
+src/transpile.rs  oxc TS->JS transpile + content-hash cache
+src/error.rs      exception bridging both ways + TS stack remapping
 src/exceptions.rs typed PHP exception classes
 src/manifest.rs   manifest + .d.ts generation
 src/js/*.js       msgpack codec + function-ref runtime support
