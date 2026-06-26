@@ -28,23 +28,50 @@ library required.
 
 ## Quick example
 
+PHP exposes a narrow capability surface; the guest — JavaScript or TypeScript — runs
+sandboxed and calls back in.
+
 ```php
 <?php
-$js = new QuickJS(memoryLimit: 64 * 1024 * 1024, timeoutMs: 1000);
-
-$js->register('log.info',  fn(string $m) => error_log("[js] $m"));
-$js->register('fetchUser', fn(int $id) => ['name' => 'Ada', 'orders' => [1, 2, 3]]);
+$js = new QuickJS(memoryLimit: 32 * 1024 * 1024, timeoutMs: 500);
+$js->register('fetchUser', fn(int $id) => ['name' => 'Ada', 'roles' => ['admin', 'dev']]);
 
 echo $js->eval(<<<'TS'
-    php.log.info("starting");
-    const u = php.fetchUser(42);            // re-enters PHP
-    `${u.name} has ${u.orders.length} orders`;
+    interface User { name: string; roles: string[] }   // types erase in-process
+    const u: User = php.fetchUser(42);                  // re-enters PHP
+    `${u.name} has ${u.roles.length} roles`;
 TS);
-// => "Ada has 3 orders"
+// => "Ada has 2 roles"
 ```
 
-Run it with `php -d extension=/path/to/libphp_quickjs.so hello.php`. More to copy from
-[`examples/`](examples): `kitchen_sink.php`, `modes.php`, `usage.php`.
+A tour of the rest of the bridge:
+
+```php
+// Functions cross both ways — a JS callback arrives in PHP as a Js\Callback.
+$js->register('map', fn(array $xs, callable $fn) => array_map($fn, $xs));
+$js->eval('php.map([1, 2, 3], (n: number) => n * n)');         // => [1, 4, 9]
+
+// Live objects stay host-side; JS only ever holds an opaque handle.
+$h = $js->grant(new ArrayObject(['hits' => 0]));
+$js->register('bump', fn(int $h) => ++$js->resolve($h)['hits']);
+$js->eval("php.bump($h); php.bump($h);");                      // => 2
+
+// Guest failures surface as typed exceptions, located in the original TS.
+try {
+    $js->eval("const x: any = null;\nx.field;");
+} catch (QuickJSEvalException $e) {
+    echo $e->getJsName(), ' @ line ', $e->getLine();          // => "TypeError @ line 2"
+}
+
+// Resource abuse is contained, and the engine recovers afterwards.
+$g = new QuickJS(timeoutMs: 100);
+try { $g->eval('while (true) {}'); } catch (QuickJSTimeoutException $e) {}
+$g->eval('1 + 1');                                             // => 2
+```
+
+Run with `php -d extension=/path/to/libphp_quickjs.so script.php`. Fuller programs —
+typed capabilities, `dts()`, isolated realms — in [`examples/`](examples):
+`kitchen_sink.php`, `modes.php`, `usage.php`.
 
 ## Installation
 
