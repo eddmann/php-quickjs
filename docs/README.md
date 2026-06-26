@@ -3,6 +3,8 @@
 Implementation notes and internals for the php-quickjs extension. For the
 user-facing API and quick start, see the [project README](../README.md).
 
+- **[Installation](install.md)** — prebuilt binaries for self-hosted PHP, AWS
+  Lambda (Bref), and macOS, plus building from source.
 - **[Architecture](architecture.md)** — the three worlds (PHP / Rust / QuickJS),
   the single `__host` bridge, how a call flows end to end, value marshaling, and
   bidirectional function passing.

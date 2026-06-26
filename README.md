@@ -139,6 +139,8 @@ boundary. For hostile code, add an outer VM.
 
 ## Documentation
 
+- [Installation](docs/install.md) — prebuilt binaries for self-hosted PHP, AWS
+  Lambda (Bref), and macOS; or build from source.
 - [Architecture](docs/architecture.md) — the bridge, marshaling, function
   passing, security model.
 - [Execution modes](docs/execution-modes.md) — realms, shared vs. isolated,

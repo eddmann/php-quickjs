@@ -1,0 +1,169 @@
+name: release
+
+# Manually triggered. Pass the version to cut (e.g. 0.1.0); the workflow builds
+# the extension for each target and publishes a (draft) GitHub Release with the
+# artifacts attached and auto-generated notes.
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to release, e.g. 0.1.0 (no leading v)'
+        required: true
+        type: string
+      draft:
+        description: 'Publish as a draft (review before going live)'
+        type: boolean
+        default: true
+
+permissions:
+  contents: write # create the release
+
+jobs:
+  # ──────────────────────────────────────────────────────────────────────
+  # Generic Linux — for self-hosted PHP / Docker on a modern distro.
+  # Built on Ubuntu 22.04 (glibc 2.35); ships the raw .so.
+  # ──────────────────────────────────────────────────────────────────────
+  linux:
+    name: linux ${{ matrix.arch }} · php ${{ matrix.php }}
+    runs-on: ${{ matrix.runner }}
+    continue-on-error: ${{ matrix.experimental || false }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { php: '8.4', arch: x86_64,  runner: ubuntu-22.04 }
+          - { php: '8.4', arch: aarch64, runner: ubuntu-22.04-arm }
+          - { php: '8.5', arch: x86_64,  runner: ubuntu-22.04,     experimental: true }
+          - { php: '8.5', arch: aarch64, runner: ubuntu-22.04-arm, experimental: true }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ matrix.php }}
+        env:
+          phpts: nts
+      - uses: dtolnay/rust-toolchain@1.96
+      - run: sudo apt-get update && sudo apt-get install -y clang libclang-dev
+      - run: cargo build --release
+      - name: Stage artifact
+        run: |
+          mkdir -p dist
+          cp target/release/libphp_quickjs.so \
+            "dist/php-quickjs-v${{ inputs.version }}-php${{ matrix.php }}-linux-${{ matrix.arch }}.so"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-${{ matrix.php }}-${{ matrix.arch }}
+          path: dist/*
+
+  # ──────────────────────────────────────────────────────────────────────
+  # AWS Lambda / Bref — built INSIDE the Bref Amazon Linux 2023 image so the
+  # binary loads on Lambda (glibc 2.34). Packaged as a Bref Lambda layer zip
+  # (extension + a conf.d ini) and also shipped as the raw .so.
+  # ──────────────────────────────────────────────────────────────────────
+  lambda-bref:
+    name: lambda/bref ${{ matrix.arch }} · php ${{ matrix.php }}
+    runs-on: ${{ matrix.runner }}
+    continue-on-error: ${{ matrix.experimental || false }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { php: '8.4', short: '84', arch: x86_64, runner: ubuntu-22.04 }
+          - { php: '8.4', short: '84', arch: arm64,  runner: ubuntu-22.04-arm }
+          - { php: '8.5', short: '85', arch: x86_64, runner: ubuntu-22.04,     experimental: true }
+          - { php: '8.5', short: '85', arch: arm64,  runner: ubuntu-22.04-arm, experimental: true }
+    steps:
+      - uses: actions/checkout@v4
+
+      # Build in the Bref build image via `docker run` (rather than a job
+      # `container:`) so checkout/runner tooling stays on the host. The image is
+      # multi-arch, so the arm64 runner produces an arm64 binary natively.
+      - name: Build in Bref image (bref/build-php-${{ matrix.short }})
+        run: |
+          docker run --rm -v "$PWD":/src --entrypoint /bin/bash \
+            "bref/build-php-${{ matrix.short }}" -lc '
+              set -euo pipefail
+              dnf install -y clang
+              curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs \
+                | sh -s -- -y --default-toolchain none
+              export PATH="$HOME/.cargo/bin:/opt/bin:$PATH"
+              export CARGO_TARGET_DIR=/tmp/target
+              cd /src
+              cargo build --release          # rust-toolchain.toml pins the version
+              mkdir -p dist
+              cp /tmp/target/release/libphp_quickjs.so dist/quickjs.so
+              echo "built against: $(php-config --version), glibc reqs:"
+              objdump -T dist/quickjs.so | grep -oE "GLIBC_[0-9.]+" | sort -V | uniq | tail -3
+            '
+
+      - name: Package Bref Lambda layer
+        run: |
+          ver="${{ inputs.version }}"; php="${{ matrix.php }}"; arch="${{ matrix.arch }}"
+          # Layer is mounted at /opt on Lambda; Bref scans /opt/bref/etc/php/conf.d.
+          mkdir -p layer/php-quickjs layer/bref/etc/php/conf.d
+          cp dist/quickjs.so layer/php-quickjs/quickjs.so
+          echo 'extension=/opt/php-quickjs/quickjs.so' > layer/bref/etc/php/conf.d/quickjs.ini
+          ( cd layer && zip -qr "../php-quickjs-v${ver}-php${php}-lambda-bref-${arch}.zip" . )
+          cp dist/quickjs.so "php-quickjs-v${ver}-php${php}-lambda-bref-${arch}.so"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lambda-bref-${{ matrix.php }}-${{ matrix.arch }}
+          path: |
+            php-quickjs-*.zip
+            php-quickjs-*lambda-bref*.so
+
+  # ──────────────────────────────────────────────────────────────────────
+  # macOS — for local development (not deployable to Lambda).
+  # ──────────────────────────────────────────────────────────────────────
+  macos:
+    name: macos ${{ matrix.arch }} · php ${{ matrix.php }}
+    runs-on: ${{ matrix.runner }}
+    continue-on-error: ${{ matrix.experimental || false }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { php: '8.4', arch: arm64,  runner: macos-14 }
+          - { php: '8.4', arch: x86_64, runner: macos-13 }
+          - { php: '8.5', arch: arm64,  runner: macos-14, experimental: true }
+          - { php: '8.5', arch: x86_64, runner: macos-13, experimental: true }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ matrix.php }}
+      - uses: dtolnay/rust-toolchain@1.96
+      - run: cargo build --release
+      - name: Stage artifact
+        run: |
+          mkdir -p dist
+          cp target/release/libphp_quickjs.dylib \
+            "dist/php-quickjs-v${{ inputs.version }}-php${{ matrix.php }}-macos-${{ matrix.arch }}.dylib"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-${{ matrix.php }}-${{ matrix.arch }}
+          path: dist/*
+
+  # ──────────────────────────────────────────────────────────────────────
+  # Collect every artifact and publish the release.
+  # ──────────────────────────────────────────────────────────────────────
+  release:
+    name: publish release
+    needs: [linux, lambda-bref, macos]
+    if: always() # publish whatever built (8.5 legs may be allowed to fail)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+      - run: ls -lh artifacts
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ inputs.version }}
+          name: v${{ inputs.version }}
+          draft: ${{ inputs.draft }}
+          generate_release_notes: true
+          files: artifacts/*
