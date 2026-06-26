@@ -178,24 +178,32 @@ impl QuickJS {
         map_json: Option<&str>,
         module_id: &str,
     ) -> PhpException {
-        let (msg, stack) = error::js_error_detail(ctx, err);
+        let parts = error::js_error_parts(ctx, err);
+        let message = parts.display_message();
         if self.engine.timed_out() {
-            return PhpException::from_class::<QuickJSTimeoutException>(msg);
+            return PhpException::from_class::<QuickJSTimeoutException>(message);
         }
-        if msg.to_lowercase().contains("out of memory") {
-            return PhpException::from_class::<QuickJSMemoryException>(msg);
+        if message.to_lowercase().contains("out of memory") {
+            return PhpException::from_class::<QuickJSMemoryException>(message);
         }
-        // Remap the guest stack from generated-JS back to TypeScript coordinates.
-        let mut full = msg;
-        if let (Some(stack), Some(map)) = (stack, map_json) {
-            if let Some(remapped) = error::remap_stack(&stack, map, module_id) {
-                if let Some((line, col)) = error::top_frame_location(&remapped, module_id) {
-                    full = format!("{full} ({module_id}:{line}:{col})");
-                }
-                full = format!("{full}\n{remapped}");
-            }
-        }
-        PhpException::from_class::<QuickJSEvalException>(full)
+        // Remap the guest stack to TypeScript coordinates (guest frames only),
+        // and surface it as a structured, JS-error-like exception.
+        let remapped = parts
+            .stack
+            .as_deref()
+            .zip(map_json)
+            .and_then(|(stack, map)| error::remap_stack(stack, map, module_id));
+        let (line, _) = remapped
+            .as_deref()
+            .and_then(|s| error::top_frame_location(s, module_id))
+            .unwrap_or((0, 0));
+        exceptions::eval_exception(
+            parts.name,
+            message,
+            module_id,
+            line,
+            remapped.unwrap_or_default(),
+        )
     }
 }
 

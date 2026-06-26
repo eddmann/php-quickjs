@@ -58,55 +58,88 @@ pub fn throw_host_error(ctx: &Ctx<'_>, err: &HostError) -> JsError {
     }
 }
 
-/// Render an rquickjs error into a human-readable `Name: message` string.
-pub fn js_error_message(ctx: &Ctx<'_>, err: JsError) -> String {
-    js_error_detail(ctx, err).0
+/// The decomposed parts of a thrown JS error.
+pub struct JsErrorParts {
+    /// The error constructor name (`TypeError`, `Error`, or a PHP class for a
+    /// re-surfaced host exception).
+    pub name: String,
+    /// The error message, without the name prefix.
+    pub message: String,
+    /// The JS stack (generated-JS coordinates), if any.
+    pub stack: Option<String>,
 }
 
-/// Like [`js_error_message`], but also returns the JS stack (in generated-JS
-/// coordinates) when the error carries one. The bare `Error` name is elided
-/// from the message to avoid a redundant prefix.
-pub fn js_error_detail(ctx: &Ctx<'_>, err: JsError) -> (String, Option<String>) {
+impl JsErrorParts {
+    /// `Name: message`, eliding a bare `Error` name to avoid a redundant prefix.
+    pub fn display_message(&self) -> String {
+        match (self.name.as_str(), self.message.is_empty()) {
+            (_, true) => self.name.clone(),
+            ("Error", false) => self.message.clone(),
+            (_, false) => format!("{}: {}", self.name, self.message),
+        }
+    }
+}
+
+/// Render an rquickjs error into a human-readable `Name: message` string.
+pub fn js_error_message(ctx: &Ctx<'_>, err: JsError) -> String {
+    js_error_parts(ctx, err).display_message()
+}
+
+/// Decompose a thrown JS error into name / message / stack.
+pub fn js_error_parts(ctx: &Ctx<'_>, err: JsError) -> JsErrorParts {
     match err {
         JsError::Exception => {
             let val = ctx.catch();
             if let Some(ex) = val.as_exception() {
-                let msg = ex.message().unwrap_or_default();
                 let name = ex
                     .get::<_, Option<String>>("name")
                     .ok()
                     .flatten()
                     .unwrap_or_else(|| "Error".to_owned());
-                let message = match (name.as_str(), msg.is_empty()) {
-                    (_, true) => name,
-                    ("Error", false) => msg,
-                    (_, false) => format!("{name}: {msg}"),
-                };
-                (message, ex.stack())
+                JsErrorParts {
+                    name,
+                    message: ex.message().unwrap_or_default(),
+                    stack: ex.stack(),
+                }
             } else {
                 let message = val
                     .as_string()
                     .and_then(|s| s.to_string().ok())
                     .unwrap_or_else(|| "uncaught JS exception".to_owned());
-                (message, None)
+                JsErrorParts {
+                    name: "Error".to_owned(),
+                    message,
+                    stack: None,
+                }
             }
         }
-        other => (other.to_string(), None),
+        other => JsErrorParts {
+            name: "Error".to_owned(),
+            message: other.to_string(),
+            stack: None,
+        },
     }
 }
 
-/// Remap a JS stack (generated coordinates) back to TypeScript coordinates
-/// using the module's source map. Frames referencing `module_id` have their
-/// `:line:col` rewritten to the original TS position; other lines pass through.
-/// Returns `None` if the map cannot be parsed.
+/// Remap a JS stack back to TypeScript coordinates, keeping only guest frames.
+///
+/// Frames that reference `module_id` have their `:line:col` rewritten to the
+/// original TS position; internal host frames (the msgpack/runtime bootstrap
+/// and the `php.*` facade wrappers) are dropped so the trace reads like a plain
+/// TS stack. Returns `None` if the map cannot be parsed or no guest frame
+/// remains.
 pub fn remap_stack(stack: &str, map_json: &str, module_id: &str) -> Option<String> {
     let sm = sourcemap::SourceMap::from_slice(map_json.as_bytes()).ok()?;
-    let out = stack
+    let out: Vec<String> = stack
         .lines()
+        .filter(|line| line.contains(module_id))
         .map(|line| remap_line(line, &sm, module_id))
-        .collect::<Vec<_>>()
-        .join("\n");
-    Some(out)
+        .collect();
+    if out.is_empty() {
+        None
+    } else {
+        Some(out.join("\n"))
+    }
 }
 
 /// The original-TS `(line, col)` of the top stack frame that references the

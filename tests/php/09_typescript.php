@@ -41,15 +41,18 @@ eq(30, $js->eval('const r: number = php.add(10, 20); r;'), 'typed guest calls a 
 
 // --- Error remapping to TS coordinates -----------------------------------
 // A fully-erased interface (lines 1-4) shifts the throw: it lands on generated
-// JS line 1, but the source map must report the original TS line 5.
+// JS line 1, but the source map must report the original TS line 5. The
+// exception exposes the TS location like a real JS/TS error.
 try {
     $js->eval("interface Foo {\n  a: number;\n  b: string;\n}\nthrow new Error(\"deep\");");
     ok(false, 'expected throw');
 } catch (QuickJSEvalException $e) {
-    $m = $e->getMessage();
-    ok(str_contains($m, 'deep'), 'error message preserved');
-    ok(str_contains($m, 'guest.ts:5'), "error remapped to original TS line 5 (got: " . explode("\n", $m)[0] . ")");
-    ok(!str_contains($m, 'guest.ts:1:'), 'not reported at the generated JS line 1');
+    eq('deep', $e->getMessage(), 'getMessage() is the clean error text');
+    eq('guest.ts', $e->getFile(), 'getFile() is the guest module');
+    eq(5, $e->getLine(), 'getLine() is the original TS line 5, not generated JS line 1');
+    eq('Error', $e->getJsName(), 'getJsName() exposes the JS error constructor');
+    ok(str_contains($e->getJsStack(), 'guest.ts:5'), 'getJsStack() cites the TS line');
+    ok(!str_contains($e->getJsStack(), 'eval_script'), 'getJsStack() has no internal host frames');
 }
 
 // A runtime TypeError is remapped to the TS line that triggered it.
@@ -57,7 +60,8 @@ try {
     $js->eval("const a: number = 1;\nconst obj: any = null;\nobj.field;");
     ok(false, 'expected throw');
 } catch (QuickJSEvalException $e) {
-    ok(str_contains($e->getMessage(), 'guest.ts:3'), 'runtime error remapped to TS line 3');
+    eq(3, $e->getLine(), 'runtime error remapped to TS line 3');
+    eq('TypeError', $e->getJsName(), 'JS error name is TypeError');
 }
 
 // --- Transpile / syntax errors ------------------------------------------
