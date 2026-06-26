@@ -71,8 +71,7 @@ impl Engine {
     /// Arm the wall-clock deadline for an eval and clear the timeout flag.
     pub fn arm_deadline(&self) {
         self.timed_out.set(false);
-        self.deadline
-            .set(self.timeout.map(|t| Instant::now() + t));
+        self.deadline.set(self.timeout.map(|t| Instant::now() + t));
     }
 
     /// Disarm the deadline once an eval completes.

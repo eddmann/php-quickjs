@@ -31,7 +31,7 @@ test-rust:
 
 test-php: build
 	@fail=0; \
-	for t in tests/php/0*.php; do \
+	for t in tests/php/[0-9]*.php; do \
 	  printf '\n=== %s ===\n' "$$t"; \
 	  $(PHP) "$$t" || fail=1; \
 	done; \

@@ -41,7 +41,10 @@ pub struct TranspileError {
 /// Transpile TS -> JS. `module_id` names the module (used as the codegen source
 /// path and the QuickJS filename, so stack frames are attributable). Returns a
 /// located [`TranspileError`] on parse/transform failure.
-pub fn transpile(source: &str, module_id: &str) -> Result<(String, Option<String>), TranspileError> {
+pub fn transpile(
+    source: &str,
+    module_id: &str,
+) -> Result<(String, Option<String>), TranspileError> {
     let options = TransformOptions::from_target("esnext").map_err(|e| TranspileError {
         message: format!("invalid transform target: {e}"),
         line: 0,
@@ -189,7 +192,10 @@ mod tests {
     #[test]
     fn strips_types() {
         let (js, map) = transpile("const x: number = 41;\nconst y = x + 1;", "m.ts").unwrap();
-        assert!(!js.contains(": number"), "type annotation not stripped: {js}");
+        assert!(
+            !js.contains(": number"),
+            "type annotation not stripped: {js}"
+        );
         assert!(js.contains("41"));
         assert!(map.is_some(), "source map should be emitted");
     }

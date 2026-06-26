@@ -37,7 +37,6 @@ impl Drop for JsCallback {
 }
 
 impl JsCallback {
-
     /// Invoke the underlying JS function with the given (already PHP-side) args.
     fn invoke_inner(&self, args: &[&Zval]) -> PhpResult<Zval> {
         let _guard = self.engine.enter().map_err(PhpException::default)?;
@@ -64,12 +63,14 @@ impl JsCallback {
             let ret: Value = invoke
                 .call((id as f64, arg_bytes))
                 .map_err(|e| crate::error::js_error_to_php(ctx, e))?;
-            let ta = TypedArray::<u8>::from_value(ret)
-                .map_err(|e| PhpException::default(format!("JS callback did not return bytes: {e}")))?;
+            let ta = TypedArray::<u8>::from_value(ret).map_err(|e| {
+                PhpException::default(format!("JS callback did not return bytes: {e}"))
+            })?;
             let bytes = ta
                 .as_bytes()
                 .ok_or_else(|| PhpException::default("detached result buffer".to_owned()))?;
-            let mv = MiddleValue::from_msgpack(bytes).map_err(|e| PhpException::default(e.to_string()))?;
+            let mv = MiddleValue::from_msgpack(bytes)
+                .map_err(|e| PhpException::default(e.to_string()))?;
             middle_to_zval(&mv, &engine.state).map_err(PhpException::default)
         };
 

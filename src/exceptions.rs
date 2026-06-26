@@ -100,7 +100,12 @@ pub fn eval_exception(
 }
 
 /// Write a string property `name` on `obj` using `scope` for visibility.
-fn set_prop_str(scope: *mut zend_class_entry, obj: *mut zend_object, name: &std::ffi::CStr, value: &str) {
+fn set_prop_str(
+    scope: *mut zend_class_entry,
+    obj: *mut zend_object,
+    name: &std::ffi::CStr,
+    value: &str,
+) {
     let mut zv = Zval::new();
     if zv.set_string(value, false).is_ok() {
         unsafe {

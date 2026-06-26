@@ -33,7 +33,9 @@ impl HostError {
 pub fn php_exception_info(err: PhpError) -> HostError {
     match err {
         PhpError::Exception(obj) => {
-            let class = obj.get_class_name().unwrap_or_else(|_| "Exception".to_owned());
+            let class = obj
+                .get_class_name()
+                .unwrap_or_else(|_| "Exception".to_owned());
             // `message` is a protected property; getMessage() reads it reliably.
             let message = obj
                 .try_call_method("getMessage", vec![])

@@ -1,74 +1,84 @@
 # php-quickjs
 
-A PHP extension that embeds a [QuickJS-NG](https://github.com/quickjs-ng/quickjs)
-sandbox with **typed, bidirectional** communication. PHP runs untrusted JS in an
-isolated context, exposes a controlled allowlist of PHP capabilities into JS as a
-frozen, namespaced `php.module.fn()` SDK, and JS can call back into PHP
-mid-execution.
+Run **untrusted JavaScript or TypeScript inside PHP**, safely and ergonomically.
 
-Guest code may be **TypeScript**: it is transpiled to JavaScript in-process with
-[`oxc`](https://github.com/oxc-project/oxc) before QuickJS ever sees it, and
-runtime errors are mapped back to the original TS line/column.
+PHP applications increasingly need to execute user-supplied logic — rules,
+formulas, templates, plugins, AI-generated snippets. Doing that in PHP itself
+means `eval()` (no isolation) or a separate service (operational weight).
+`php-quickjs` embeds a [QuickJS-NG](https://github.com/quickjs-ng/quickjs) engine
+directly in the process and gives you a **typed, bidirectional bridge**:
 
-Written in Rust using [`ext-php-rs`](https://github.com/davidcole1340/ext-php-rs)
-(Zend side), [`rquickjs`](https://github.com/DelSkayn/rquickjs) (QuickJS-NG is
-bundled — no system library needed), and `oxc` for the TypeScript fast path.
+- The guest runs in an **isolated context** with memory, time, and stack limits.
+- PHP exposes a **controlled allowlist** of capabilities into JS as a frozen,
+  namespaced `php.module.fn()` SDK — the guest can only reach what you grant.
+- JS can **call back into PHP** mid-execution, pass functions both ways, and
+  hold opaque handles to live PHP objects.
+- Guest code may be **TypeScript**: it is transpiled to JS in-process with
+  [`oxc`](https://github.com/oxc-project/oxc), and runtime errors are mapped back
+  to the original TS line/column.
+
+Written in Rust with [`ext-php-rs`](https://github.com/davidcole1340/ext-php-rs)
+(the Zend side) and [`rquickjs`](https://github.com/DelSkayn/rquickjs) (QuickJS-NG
+is bundled — no system library needed).
 
 > **Scope.** This is an *embedder*, not a security boundary against hostile code
-> on its own. The capability model contains *what JS can reach*; the memory/CPU
-> limits contain *resource abuse* (infinite loops, alloc bombs). QuickJS C
+> on its own. The capability model contains *what JS can reach*; the resource
+> limits contain *abuse* (infinite loops, alloc bombs). QuickJS C
 > memory-corruption bugs are **not** contained — for attacker-controlled code,
 > nest the whole extension inside an outer microVM/gVisor boundary.
 
-## Quick start
+## Getting started
+
+**Requirements:** Rust 1.96+ (for oxc), clang, and PHP 8.4 dev headers
+(`php-config`). The extension is a plain cargo `cdylib` — no `phpize` step.
+
+```sh
+git clone https://github.com/eddmann/php-quickjs && cd php-quickjs
+make build        # -> target/debug/libphp_quickjs.so
+make test         # Rust unit tests + PHP integration suite
+```
+
+Load it and run your first guest:
 
 ```php
+<?php
+// hello.php — run with:
+//   php -d extension=$(pwd)/target/debug/libphp_quickjs.so hello.php
+
 $js = new QuickJS(memoryLimit: 64 * 1024 * 1024, timeoutMs: 1000);
 
 $js->register('log.info',  fn(string $m) => error_log("[js] $m"));
 $js->register('fetchUser', fn(int $id) => ['name' => 'Ada', 'orders' => [1, 2, 3]]);
 
-echo $js->eval(<<<'JS'
+echo $js->eval(<<<'TS'
     php.log.info("starting");
     const u = php.fetchUser(42);            // reenters PHP
     `${u.name} has ${u.orders.length} orders`;
-JS);
+TS);
 // => "Ada has 3 orders"
 ```
 
-## Building
-
-Requires Rust (1.96+, for oxc), clang, and the PHP dev headers (`php-config`,
-`phpize`). The extension is a plain cargo `cdylib` — no `phpize` step.
-
-```sh
-make build                 # debug -> target/debug/libphp_quickjs.so
-make release               # optimized -> target/release/libphp_quickjs.so
-make test                  # Rust unit tests + PHP integration suite
-make example               # run examples/usage.php
-
-# Load it:
-php -d extension=$(pwd)/target/release/libphp_quickjs.so script.php
-```
+More to copy from: [`examples/kitchen_sink.php`](examples/kitchen_sink.php) (every
+feature), [`examples/modes.php`](examples/modes.php), and
+[`examples/usage.php`](examples/usage.php).
 
 ## API
 
 ### `new QuickJS(?int $memoryLimit = null, ?int $timeoutMs = null, ?int $maxStack = null, bool $isolated = false)`
-All limits default to unbounded; pass non-zero values to contain resource abuse.
-`isolated: true` runs each `eval()` in a fresh realm (see [Execution scope](#execution-scope)).
+Limits default to unbounded; pass non-zero values to contain resource abuse.
+`isolated: true` runs each `eval()` in a fresh realm (see
+[execution modes](docs/execution-modes.md)).
 
 ### `register(string $name, callable $fn, ?string $types = null): void`
-Expose a PHP callable to JS under a flat, dotted name. The name becomes
+Expose a PHP callable to JS under a flat, dotted name — it becomes
 `php.<dotted.name>(...)` in the guest. `$types` is an optional TypeScript
-signature surfaced by `dts()`. The dotted-name registry is the **entire** trust
-boundary — flat and greppable.
+signature surfaced by `dts()`. This flat registry is the **entire** trust
+boundary.
 
 ### `eval(string $code): mixed`
-Run **TypeScript or JavaScript** and marshal the result back. The source is
-transpiled to JS with oxc (types erased, esnext target) before QuickJS sees it;
-the frozen `php.*` facade is (re)built from the current manifest before the guest
-runs. Runtime errors raise a `QuickJSEvalException` whose message and stack are
-remapped to the original TS line/column. See [TypeScript](#typescript) below.
+Run TypeScript or JavaScript and marshal the result back to PHP. Errors raise a
+`QuickJSEvalException` located at the original TS line/column (see
+[errors](docs/errors.md)).
 
 ### `grant(mixed $resource): int` / `resolve(int $h): mixed` / `revoke(int $h): bool`
 Capability handles for live, stateful objects (DB connections, file handles).
@@ -82,10 +92,10 @@ $js->register('db.query', fn(int $handle, string $sql) => $js->resolve($handle)-
 ```
 
 ### `manifest(): array` / `dts(): string`
-The manifest (`[['name' => ..., 'types' => ...], ...]`) and a generated
-TypeScript `.d.ts` for the `php` global, both from the same source of truth.
+The registration manifest and a generated TypeScript `.d.ts` for the `php`
+global, both from the same source of truth.
 
-## How it works
+## How it works (in brief)
 
 ```
 PHP (trusted)  ──ext-php-rs──►  Rust bridge  ──rquickjs──►  QuickJS (untrusted)
@@ -93,157 +103,60 @@ PHP (trusted)  ──ext-php-rs──►  Rust bridge  ──rquickjs──►  
    eval()                      __host(name, bytes)           frozen php.* facade
 ```
 
-- **One host import.** Everything JS reaches goes through a single
-  `__host(name, argsBytes)` function and a flat dispatch table. The namespaced
-  `php.*` tree is cosmetic JS built from the manifest and **frozen** so guests
-  cannot shadow a capability.
-- **msgpack wire format.** Values cross the boundary as MessagePack payloads. A
-  neutral `MiddleValue` (de)serializes to *native* msgpack and converts to JS
-  values / PHP zvals; a small pure-JS codec (`src/js/msgpack.js`) interoperates
-  with it.
-- **Functions both ways.** A PHP callable handed to JS becomes a callable that
-  routes back through the host; a JS function handed to PHP becomes a
-  `Js\Callback` object whose `__invoke` re-enters JS. A depth guard bounds
-  runaway mutual recursion.
-- **Errors both ways.** A JS error past `eval` becomes a typed
-  `QuickJSEvalException` (or `QuickJSTimeoutException` / `QuickJSMemoryException`);
-  a PHP exception inside a callback becomes a JS `Error` exposing `e.phpClass`.
+Everything the guest reaches goes through a **single** `__host(name, argsBytes)`
+import and a flat dispatch table — the namespaced `php.*` tree is cosmetic JS,
+built from the manifest and **frozen**. Values cross as MessagePack; functions
+cross both ways as references backed by registries; errors bridge both ways and
+remap to TS coordinates.
 
-## TypeScript
+→ Full details in **[docs/architecture.md](docs/architecture.md)**.
 
-`eval()` accepts TypeScript. The fast path — the Bun model — is transpile-and-go,
-**no type-checking on the hot path**:
+### TypeScript
 
-```
-eval(tsSource)
-  ├─ oxc transform  → js + source map   (types erased, esnext target)
-  │     cache: hash(source) → (js, map)  — the map stays host-side
-  ├─ rquickjs runs the JS (QuickJS only ever sees JS)
-  └─ on throw → remap stack JS→TS coords → QuickJSEvalException
-```
+`eval()` accepts TS (the Bun model: transpile-and-go, no type-checking on the hot
+path). Types/`interface`/generics erase; the transpile result is cached by
+content hash; the source map stays host-side and is used only to remap errors.
+→ [docs/architecture.md#the-typescript-fast-path](docs/architecture.md#the-typescript-fast-path).
 
-- **Always transpile.** Plain JS is valid TS, so it round-trips unchanged. The
-  content-hash LRU cache makes re-running the same guest free.
-- **esnext target.** A near-identity transform — just strip types. QuickJS-NG
-  natively supports private fields, nullish, optional chaining, etc., so nothing
-  is downleveled and source maps stay tight.
-- **Full TS transform.** Type annotations, `interface`, `type`, generics and
-  `as` casts erase to nothing; constructs that emit runtime code — `enum`,
-  `namespace`, decorators — are transformed by oxc and work (the esbuild/Bun
-  model). There is no separate type-erasure-only mode.
-- **Errors map back to TS.** A guest throw becomes a `QuickJSEvalException`
-  whose `getFile()`/`getLine()` are the original TS location and whose
-  `getJsStack()` is the remapped, guest-only stack — even when type erasure
-  shifted the generated JS:
+### Execution modes
 
-  ```php
-  try {
-      $js->eval("interface Foo { a: number }\n\nthrow new Error('boom');");
-  } catch (QuickJSEvalException $e) {
-      $e->getMessage();   // "boom"
-      $e->getLine();      // 3   (original TS line, not generated JS line 1)
-      $e->getJsName();    // "Error"
-      $e->getJsStack();   // "    at <eval> (guest.ts:3:7)"
-  }
-  ```
+By default, all `eval()` calls on an instance share one **persistent** global
+realm (a REPL-like session; state and callbacks carry over). Pass
+`isolated: true` to run **each `eval()` in its own fresh realm** (a stateless
+script runner). → [docs/execution-modes.md](docs/execution-modes.md).
 
-  Syntax errors are located too (`getLine()` + `getJsName() === 'SyntaxError'`),
-  and a non-`Error` `throw` (object/array/number) is JSON-rendered into the
-  message rather than dropped.
-- **Source maps never enter the sandbox** — they are kept host-side, keyed by
-  content hash, and used only when remapping an error.
+### Sandbox & security
 
-Type-*checking* (e.g. a bundled `tsgo`) is intentionally absent and can be slotted
-in later without reshaping this pipeline.
+| Layer | Contains |
+|-------|----------|
+| frozen `php.*` + flat dispatch table | what JS can *name* / reach |
+| capability handles | which live objects JS can *use* |
+| `memoryLimit` / `timeoutMs` / `maxStack` | resource abuse (loops, alloc bombs) |
+| **outer microVM / gVisor** | QuickJS C memory-corruption → host RCE |
 
-### Execution scope
+These are resource guards; the extension is the embedder, not a memory-safety
+boundary. For hostile code, add an outer VM.
 
-By default, all `eval()` calls on one `QuickJS` instance share a single,
-persistent global realm (like a REPL session): top-level
-`var`/`let`/`const`/`function` and `globalThis` carry over between calls, and a
-JS function handed to PHP stays callable for the instance's lifetime (its
-registry entry is freed when the PHP `Js\Callback` is garbage-collected).
+## Documentation
 
-Pass `isolated: true` to run **each `eval()` in its own fresh realm** — a
-stateless script runner:
-
-```php
-$js = new QuickJS(isolated: true);
-$js->eval('const k = 1;');
-$js->eval('const k = 2;');     // no redeclaration clash — different world
-$js->eval('typeof k;');        // "undefined"
-```
-
-In isolated mode, registered capabilities, handles, marshaling and
-*synchronous* callbacks all work as normal, but a JS callback **cannot outlive
-the `eval()` that created it** (its realm is discarded) — invoking a stored one
-later throws. Choose per intent: the instance is the unit of isolation, and
-`isolated: true` shrinks it to a single eval.
-
-## Value marshaling
-
-| JS                 | PHP                        |
-|--------------------|----------------------------|
-| null / undefined   | null                       |
-| boolean            | bool                       |
-| number (integer)   | int                        |
-| number (float)     | float                      |
-| string             | string (UTF-8)             |
-| Uint8Array         | binary string              |
-| Array              | indexed array              |
-| Object             | associative array          |
-| function           | `Js\Callback` ⇄ callable   |
-
-Non-UTF-8 PHP strings cross as bytes (`Uint8Array`). Integers beyond 2^53 lose
-precision as JS numbers.
-
-## Sandbox knobs
-
-| Limit              | Guards                                   |
-|--------------------|------------------------------------------|
-| `memoryLimit`      | allocation bombs (`QuickJSMemoryException`) |
-| `timeoutMs`        | infinite loops, wall-clock (`QuickJSTimeoutException`) |
-| `maxStack`         | native stack exhaustion                  |
-| frozen `php.*`     | what JS can name / reach                 |
-| capability handles | which live objects JS can use            |
-
-These are **resource** guards. For hostile code, add an outer VM boundary.
+- [Architecture](docs/architecture.md) — the bridge, marshaling, function
+  passing, security model.
+- [Execution modes](docs/execution-modes.md) — realms, shared vs. isolated,
+  callback lifecycle.
+- [Errors](docs/errors.md) — typed exceptions, both-way bridging, TS remapping.
 
 ## Project layout
 
 ```
-src/lib.rs        QuickJS class + module
-src/engine.rs     runtime/context, depth guard, current-ctx stack
-src/bridge.rs     __host dispatch, frozen facade, registries
-src/marshal.rs    MiddleValue <-> JS / PHP, native-msgpack serde
-src/callback.rs   Js\Callback (JS function -> PHP)
-src/handles.rs    capability handle table
-src/sandbox.rs    memory/stack limits + wall-clock interrupt
-src/transpile.rs  oxc TS->JS transpile + content-hash cache
-src/error.rs      exception bridging both ways + TS stack remapping
-src/exceptions.rs typed PHP exception classes
-src/manifest.rs   manifest + .d.ts generation
-src/js/*.js       msgpack codec + function-ref runtime support
-tests/php/*.php   integration suite
-examples/*.php    runnable demos (kitchen_sink, modes, usage)
-docs/*.md         implementation deep-dive
+src/lib.rs        QuickJS class + module          src/handles.rs    capability handle table
+src/engine.rs     runtime/realms, re-entrancy     src/sandbox.rs    memory/stack/timeout limits
+src/bridge.rs     __host dispatch, frozen facade   src/error.rs      exception bridging + TS remap
+src/marshal.rs    value <-> msgpack <-> zval       src/exceptions.rs typed exception classes
+src/callback.rs   Js\Callback (JS fn -> PHP)       src/manifest.rs   manifest + .d.ts generation
+src/transpile.rs  oxc TS->JS + cache               src/js/*.js       in-sandbox codec + runtime
+docs/             implementation guide            examples/         runnable demos
+tests/php/        integration suite
 ```
-
-## Documentation
-
-In-depth implementation notes live in [`docs/`](docs/):
-
-- [Architecture](docs/architecture.md) — the bridge, marshaling, and how a call
-  flows end to end.
-- [Execution modes](docs/execution-modes.md) — realms, shared vs. isolated, and
-  the callback registry lifecycle.
-- [Errors](docs/errors.md) — typed exceptions, both-way bridging, and TS stack
-  remapping.
-
-Runnable examples are in [`examples/`](examples/):
-[`kitchen_sink.php`](examples/kitchen_sink.php) (every feature),
-[`modes.php`](examples/modes.php) (shared vs. isolated),
-[`usage.php`](examples/usage.php) (minimal).
 
 ## License
 

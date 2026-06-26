@@ -1,0 +1,73 @@
+name: test
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: test-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: PHP ${{ matrix.php }} on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest]
+        php: ['8.3', '8.4']
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up PHP ${{ matrix.php }}
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ matrix.php }}
+          # NTS build; setup-php installs the matching dev headers (php-config).
+        env:
+          phpts: nts
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@1.96
+        with:
+          components: rustfmt
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: php-${{ matrix.php }}
+
+      - name: Install build dependencies (clang/libclang for bindgen)
+        run: sudo apt-get update && sudo apt-get install -y clang libclang-dev
+
+      - name: Check formatting
+        run: cargo fmt --check
+
+      - name: Build
+        run: cargo build
+
+      - name: Rust unit tests
+        run: cargo test --lib
+
+      - name: PHP integration suite
+        run: |
+          EXT="$(pwd)/target/debug/libphp_quickjs.so"
+          php -d extension="$EXT" -r 'exit(class_exists("QuickJS") ? 0 : 1);' \
+            || { echo "extension failed to load"; exit 1; }
+          fail=0
+          for t in tests/php/[0-9]*.php; do
+            echo "== $t =="
+            php -d extension="$EXT" "$t" || fail=1
+          done
+          exit $fail
+
+      - name: Examples
+        run: |
+          EXT="$(pwd)/target/debug/libphp_quickjs.so"
+          for ex in examples/*.php; do
+            echo "== $ex =="
+            php -d extension="$EXT" "$ex" > /dev/null || exit 1
+          done

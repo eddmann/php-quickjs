@@ -7,8 +7,8 @@
 
 use ext_php_rs::types::Zval;
 use std::cell::Cell;
-use std::collections::HashMap;
 use std::cell::RefCell;
+use std::collections::HashMap;
 
 #[derive(Default)]
 pub struct HandleTable {

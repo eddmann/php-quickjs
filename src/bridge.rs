@@ -106,7 +106,11 @@ impl BridgeState {
     }
 
     fn names(&self) -> Vec<String> {
-        self.manifest.borrow().iter().map(|e| e.name.clone()).collect()
+        self.manifest
+            .borrow()
+            .iter()
+            .map(|e| e.name.clone())
+            .collect()
     }
 }
 
@@ -123,7 +127,8 @@ fn call_php(
         .map_err(HostError::internal)?;
     let params: Vec<&dyn IntoZvalDyn> = zvals.iter().map(|z| z as &dyn IntoZvalDyn).collect();
 
-    let callable = ZendCallable::new(callable_zv).map_err(|e| HostError::internal(e.to_string()))?;
+    let callable =
+        ZendCallable::new(callable_zv).map_err(|e| HostError::internal(e.to_string()))?;
     let ret = callable
         .try_call(params)
         .map_err(crate::error::php_exception_info)?;
@@ -132,7 +137,11 @@ fn call_php(
 
 /// Dispatch a named host call. Returns `Err` for an unknown capability (the
 /// trust-boundary rejection) or a failed call.
-fn host_call(state: &BridgeState, name: &str, args: Vec<MiddleValue>) -> Result<MiddleValue, HostError> {
+fn host_call(
+    state: &BridgeState,
+    name: &str,
+    args: Vec<MiddleValue>,
+) -> Result<MiddleValue, HostError> {
     let callable_zv = state
         .dispatch
         .borrow()
@@ -143,7 +152,11 @@ fn host_call(state: &BridgeState, name: &str, args: Vec<MiddleValue>) -> Result<
 }
 
 /// Invoke an anonymous PHP callable (one previously handed to JS) by id.
-fn php_fn_call(state: &BridgeState, id: u64, args: Vec<MiddleValue>) -> Result<MiddleValue, HostError> {
+fn php_fn_call(
+    state: &BridgeState,
+    id: u64,
+    args: Vec<MiddleValue>,
+) -> Result<MiddleValue, HostError> {
     let callable_zv = state
         .get_php_fn(id)
         .ok_or_else(|| HostError::internal(format!("unknown PHP callable id {id}")))?;
@@ -176,7 +189,10 @@ pub fn install<'js>(ctx: &Ctx<'js>, state: Rc<BridgeState>) -> rquickjs::Result<
     let host_state = state.clone();
     let host = Function::new(
         ctx.clone(),
-        move |ctx: Ctx<'js>, name: String, args_bytes: TypedArray<'js, u8>| -> rquickjs::Result<Value<'js>> {
+        move |ctx: Ctx<'js>,
+              name: String,
+              args_bytes: TypedArray<'js, u8>|
+              -> rquickjs::Result<Value<'js>> {
             let bytes = args_bytes
                 .as_bytes()
                 .ok_or_else(|| Exception::throw_type(&ctx, "__host args must be a Uint8Array"))?;
@@ -197,10 +213,13 @@ pub fn install<'js>(ctx: &Ctx<'js>, state: Rc<BridgeState>) -> rquickjs::Result<
     let php_state = state.clone();
     let php_invoke = Function::new(
         ctx.clone(),
-        move |ctx: Ctx<'js>, id: f64, args_bytes: TypedArray<'js, u8>| -> rquickjs::Result<Value<'js>> {
-            let bytes = args_bytes
-                .as_bytes()
-                .ok_or_else(|| Exception::throw_type(&ctx, "__php_invoke args must be a Uint8Array"))?;
+        move |ctx: Ctx<'js>,
+              id: f64,
+              args_bytes: TypedArray<'js, u8>|
+              -> rquickjs::Result<Value<'js>> {
+            let bytes = args_bytes.as_bytes().ok_or_else(|| {
+                Exception::throw_type(&ctx, "__php_invoke args must be a Uint8Array")
+            })?;
             let args = decode_args(bytes).map_err(|e| Exception::throw_type(&ctx, &e))?;
             let result = {
                 let _guard = push_ctx(&ctx);
