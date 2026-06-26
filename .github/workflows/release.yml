@@ -140,7 +140,9 @@ jobs:
             php-quickjs-*lambda-bref*.so
 
   # ──────────────────────────────────────────────────────────────────────
-  # macOS — for local development (not deployable to Lambda).
+  # macOS (Apple Silicon) — for local development (not deployable to Lambda).
+  # Intel (x86_64) is intentionally omitted: the macos-13 runners are scarce
+  # and Apple Silicon is the standard dev target now.
   # ──────────────────────────────────────────────────────────────────────
   macos:
     name: macos ${{ matrix.arch }} · php ${{ matrix.php }}
@@ -149,10 +151,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { php: '8.4', arch: arm64,  runner: macos-14 }
-          - { php: '8.4', arch: x86_64, runner: macos-13 }
-          - { php: '8.5', arch: arm64,  runner: macos-14 }
-          - { php: '8.5', arch: x86_64, runner: macos-13 }
+          - { php: '8.4', arch: arm64, runner: macos-14 }
+          - { php: '8.5', arch: arm64, runner: macos-14 }
     steps:
       - uses: actions/checkout@v4
       - uses: shivammathur/setup-php@v2

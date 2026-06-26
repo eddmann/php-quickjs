@@ -11,7 +11,7 @@ Releases attach these artifacts (per PHP 8.4 / 8.5, NTS):
 | `php-quickjs-vX-php8.4-linux-x86_64.so` / `-aarch64.so` | self-hosted Linux / Docker (glibc ≥ 2.35) |
 | `php-quickjs-vX-php8.4-lambda-bref-x86_64.zip` / `-arm64.zip` | AWS Lambda via [Bref](https://bref.sh) (a ready Lambda layer) |
 | `php-quickjs-vX-php8.4-lambda-bref-*.so` | Lambda/Amazon Linux 2023, if you prefer the raw `.so` (glibc ≥ 2.34) |
-| `php-quickjs-vX-php8.4-macos-arm64.dylib` / `-x86_64.dylib` | local development on macOS |
+| `php-quickjs-vX-php8.4-macos-arm64.dylib` | local development on macOS (Apple Silicon) |
 
 > The Lambda build is made **inside the Bref Amazon Linux 2023 image** so it links
 > against glibc 2.34 and loads on Lambda; a binary built on Ubuntu links against a
