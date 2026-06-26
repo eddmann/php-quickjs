@@ -225,7 +225,25 @@ src/exceptions.rs typed PHP exception classes
 src/manifest.rs   manifest + .d.ts generation
 src/js/*.js       msgpack codec + function-ref runtime support
 tests/php/*.php   integration suite
+examples/*.php    runnable demos (kitchen_sink, modes, usage)
+docs/*.md         implementation deep-dive
 ```
+
+## Documentation
+
+In-depth implementation notes live in [`docs/`](docs/):
+
+- [Architecture](docs/architecture.md) — the bridge, marshaling, and how a call
+  flows end to end.
+- [Execution modes](docs/execution-modes.md) — realms, shared vs. isolated, and
+  the callback registry lifecycle.
+- [Errors](docs/errors.md) — typed exceptions, both-way bridging, and TS stack
+  remapping.
+
+Runnable examples are in [`examples/`](examples/):
+[`kitchen_sink.php`](examples/kitchen_sink.php) (every feature),
+[`modes.php`](examples/modes.php) (shared vs. isolated),
+[`usage.php`](examples/usage.php) (minimal).
 
 ## License
 

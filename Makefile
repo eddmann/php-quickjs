@@ -44,7 +44,10 @@ stubs:
 	  echo "cargo-php not installed; run 'cargo install cargo-php'"
 
 example: build
-	$(PHP) examples/usage.php
+	@for ex in examples/*.php; do \
+	  printf '\n=== %s ===\n' "$$ex"; \
+	  $(PHP) "$$ex"; \
+	done
 
 fmt:
 	cargo fmt
