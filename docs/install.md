@@ -96,11 +96,11 @@ links against Amazon Linux's glibc. Use `bref/build-php-8x` for x86_64 and
 `bref/arm-build-php-8x` for arm64 (and the matching PHP version):
 
 ```sh
-# --security-opt seccomp=unconfined: AL2023's dnf segfaults under Docker's
-# default seccomp profile.
+# The Bref build image exports LD_LIBRARY_PATH/LD_PRELOAD to its /opt libs,
+# which makes dnf (Python) segfault; strip them for the dnf call only.
 docker run --rm --security-opt seccomp=unconfined \
   -v "$PWD":/src --entrypoint /bin/bash bref/build-php-84 -lc '
-  dnf install -y clang clang-devel
+  env -u LD_LIBRARY_PATH -u LD_PRELOAD dnf install -y clang clang-devel
   curl --proto "=https" -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain none
   export PATH="$HOME/.cargo/bin:/opt/bin:$PATH" CARGO_TARGET_DIR=/tmp/target
   export LIBCLANG_PATH=/usr/lib64

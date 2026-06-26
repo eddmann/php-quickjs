@@ -84,14 +84,16 @@ jobs:
       # `container:`) so checkout/runner tooling stays on the host. The arm64
       # runner pulls the arm64 Bref image and builds an arm64 binary natively.
       - name: Build in Bref image (${{ matrix.image }})
-        # --security-opt seccomp=unconfined: AL2023's rpm/dnf segfaults under
-        # Docker's default seccomp profile, so relax it for the build container.
+        # The Bref build images export LD_LIBRARY_PATH/LD_PRELOAD pointing at
+        # their custom-compiled libs in /opt; dnf (a Python program) segfaults
+        # when its system modules pick those up. Strip those vars for the dnf
+        # call only — php-config and cargo still need them afterwards.
         run: |
           docker run --rm --security-opt seccomp=unconfined \
             -v "$PWD":/src --entrypoint /bin/bash \
             "${{ matrix.image }}" -lc '
               set -euo pipefail
-              dnf install -y clang clang-devel
+              env -u LD_LIBRARY_PATH -u LD_PRELOAD dnf install -y clang clang-devel
               curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs \
                 | sh -s -- -y --default-toolchain none
               export PATH="$HOME/.cargo/bin:/opt/bin:$PATH"
