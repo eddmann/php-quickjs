@@ -14,7 +14,8 @@ provider:
         file: Dockerfile
         platform: linux/arm64
         buildArgs:
-          EXT: php-quickjs-v0.0.1-php8.4-lambda-bref-arm64.so
+          # BREF_IMAGE defaults to bref/arm-php-84:3 (matches arm64 above).
+          EXT: php-quickjs-v0.0.2-php8.4-lambda-bref-arm64.so
 
 functions:
   demo:
@@ -26,7 +27,7 @@ functions:
 # Publish the layer once:
 #   aws lambda publish-layer-version \
 #     --layer-name php-quickjs-php84-arm64 --compatible-architectures arm64 \
-#     --zip-file fileb://php-quickjs-v0.0.1-php8.4-lambda-bref-arm64.zip
+#     --zip-file fileb://php-quickjs-v0.0.2-php8.4-lambda-bref-arm64.zip
 # then drop the `ecr`/`image` blocks above and use the classic runtime + layers:
 #
 # functions:

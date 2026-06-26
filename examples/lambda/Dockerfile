@@ -3,11 +3,20 @@
 # (Graviton) or linux/amd64.
 #
 #   docker build --platform linux/arm64 \
-#     --build-arg EXT=php-quickjs-v0.0.1-php8.4-lambda-bref-arm64.so -t my-app .
+#     --build-arg EXT=php-quickjs-v0.0.2-php8.4-lambda-bref-arm64.so -t my-app .
 #
-# Always pin the Bref image MAJOR version. Match the PHP minor (8.4/8.5) and the
-# architecture to the .so you copy in.
-FROM bref/php-84:3
+# The base image MUST match the target arch: Bref ships separate runtimes per
+# arch — `bref/arm-php-84` for arm64 (Graviton) and `bref/php-84` for x86_64.
+# Override BREF_IMAGE to switch (the default below tracks serverless.yml's arm64):
+#
+#   docker build --platform linux/amd64 \
+#     --build-arg BREF_IMAGE=bref/php-84:3 \
+#     --build-arg EXT=php-quickjs-v0.0.2-php8.4-lambda-bref-x86_64.so -t my-app .
+#
+# Always pin the Bref image MAJOR version. Match the PHP minor (8.4/8.5), the
+# base image arch, and the .so arch to each other.
+ARG BREF_IMAGE=bref/arm-php-84:3
+FROM ${BREF_IMAGE}
 
 # The prebuilt extension, downloaded from a php-quickjs release. Pass the file
 # name matching your PHP version + arch via --build-arg EXT=...

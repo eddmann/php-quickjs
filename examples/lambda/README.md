@@ -20,14 +20,26 @@ whether you go the layer or the Docker route.
 
 ## 1. Docker image (recommended for custom binaries)
 
-Bake the `.so` into a `FROM bref/php-XX:3` image (see [`Dockerfile`](Dockerfile)):
+Bake the `.so` into a Bref runtime image (see [`Dockerfile`](Dockerfile)):
 
 ```dockerfile
-FROM bref/php-84:3
+ARG BREF_IMAGE=bref/arm-php-84:3   # arm64 default; bref/php-84:3 for x86_64
+FROM ${BREF_IMAGE}
 ARG EXT
 COPY ${EXT} /opt/bref/extensions/quickjs.so
 RUN echo 'extension=quickjs.so' > /opt/bref/etc/php/conf.d/ext-quickjs.ini
 COPY . /var/task
+```
+
+> **Match the base image to the arch.** Bref ships a separate runtime per
+> architecture — `bref/arm-php-84` for arm64 (Graviton) and `bref/php-84` for
+> x86_64 — so the base image, the `--platform`, and the `.so` arch must all
+> agree. Copying an arm64 `.so` into an x86_64 base (or vice-versa) builds an
+> image that won't load the extension on Lambda.
+
+```sh
+composer require bref/bref
+serverless deploy        # builds the image (buildArg EXT=...), pushes to ECR, deploys
 ```
 
 ```sh
@@ -43,7 +55,7 @@ Publish the layer once, then reference its ARN alongside the Bref runtime:
 aws lambda publish-layer-version \
   --layer-name php-quickjs-php84-arm64 \
   --compatible-architectures arm64 \
-  --zip-file fileb://php-quickjs-v0.0.1-php8.4-lambda-bref-arm64.zip
+  --zip-file fileb://php-quickjs-v0.0.2-php8.4-lambda-bref-arm64.zip
 ```
 
 ```yaml
@@ -68,6 +80,42 @@ per-project config.
 ; php/conf.d/quickjs.ini
 extension=/var/task/quickjs.so
 ```
+
+## Test locally
+
+You can exercise the whole thing on your machine before deploying — Bref's
+runtime images bundle the AWS Runtime Interface Emulator (RIE). Use the image and
+`.so` that match your host arch (`bref/arm-php-84:3` + `arm64.so` on Apple
+Silicon; `bref/php-84:3` + `x86_64.so` on Intel/`--platform linux/amd64`).
+
+**Quick smoke test** — does the extension load and run a guest?
+
+```sh
+docker run --rm \
+  -v "$PWD/quickjs.so":/opt/bref/extensions/quickjs.so:ro \
+  --entrypoint /bin/sh bref/arm-php-84:3 -c '
+    echo "extension=quickjs.so" > /opt/bref/etc/php/conf.d/ext-quickjs.ini
+    /opt/bin/php -r "var_dump(class_exists(\"QuickJS\"));"          # bool(true)
+    /opt/bin/php -r "echo (new QuickJS())->eval(\"41+1\"), PHP_EOL;" # 42
+  '
+```
+
+**Full Lambda invoke** — build the image and call it through the RIE:
+
+```sh
+composer require bref/bref           # the handler needs vendor/autoload.php
+cp /path/to/quickjs.so ./quickjs.so  # into the build context
+docker build --build-arg EXT=quickjs.so -t php-quickjs-demo .
+docker run --rm -e BREF_RUNTIME=function -p 9000:8080 php-quickjs-demo index.php
+# in another shell:
+curl -s "http://localhost:9000/2015-03-31/functions/function/invocations" \
+  -d '{"name":"Lambda"}'
+# => {"message":"Hello, Lambda! 2 ** 10 = 1024"}
+```
+
+> **`BREF_RUNTIME=function` is required locally.** Bref's deploy tooling injects
+> it for you on real Lambda, but a bare `docker run` of the image fatals with
+> *"The environment variable `BREF_RUNTIME` is not set"* until you pass it.
 
 ---
 
