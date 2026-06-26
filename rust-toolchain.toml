@@ -1,3 +1,7 @@
 [toolchain]
 # 1.96+ required: oxc 0.137 uses stabilized `if let` guards.
 channel = "1.96"
+# Pin rustfmt here so any toolchain rustup resolves from this file (e.g. when
+# `cargo fmt` triggers an install) always has the component — CI's separate
+# component install can land on a different toolchain resolution otherwise.
+components = ["rustfmt"]
