@@ -1,0 +1,7 @@
+# PHP extensions are loaded into the running PHP process, which already provides
+# the Zend/PHP symbols (zend_*, php_*). On macOS the linker rejects undefined
+# symbols by default, so a cdylib that references them fails to link. Tell the
+# linker to resolve those symbols dynamically at load time instead. (On Linux
+# this is the default behaviour, so no flag is needed there.)
+[target.'cfg(target_os = "macos")']
+rustflags = ["-C", "link-arg=-undefined", "-C", "link-arg=dynamic_lookup"]
