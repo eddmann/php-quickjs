@@ -16,10 +16,12 @@ pub const MAX_DEPTH: usize = 200;
 /// The QuickJS engine: runtime + context + the shared bridge state.
 pub struct Engine {
     pub rt: Runtime,
-    pub ctx: Context,
     pub state: Rc<BridgeState>,
     /// Content-addressed TS->JS transpile cache (source maps kept host-side).
     pub transpile: TranspileCache,
+    /// The persistent realm in shared mode; `None` in isolated mode (a fresh
+    /// realm is created per eval and discarded afterwards).
+    shared_ctx: Option<Context>,
     depth: Cell<usize>,
     /// Per-eval wall-clock deadline; `None` when no eval is in flight.
     deadline: Rc<Cell<Option<Instant>>>,
@@ -30,20 +32,31 @@ pub struct Engine {
 }
 
 impl Engine {
-    pub fn new(memory_limit: usize, timeout_ms: u64, max_stack: usize) -> rquickjs::Result<Rc<Self>> {
+    pub fn new(
+        memory_limit: usize,
+        timeout_ms: u64,
+        max_stack: usize,
+        isolated: bool,
+    ) -> rquickjs::Result<Rc<Self>> {
         let rt = Runtime::new()?;
         sandbox::apply_limits(&rt, memory_limit, max_stack);
         let deadline = Rc::new(Cell::new(None));
         let timed_out = Rc::new(Cell::new(false));
         sandbox::install_interrupt(&rt, deadline.clone(), timed_out.clone());
 
-        let ctx = Context::full(&rt)?;
+        // Shared mode: one persistent realm. Isolated mode: a fresh realm per
+        // eval (so each eval is its own world; cross-eval state is not kept).
+        let shared_ctx = if isolated {
+            None
+        } else {
+            Some(Context::full(&rt)?)
+        };
         let state = BridgeState::new();
         let engine = Rc::new(Engine {
             rt,
-            ctx,
             state: state.clone(),
             transpile: TranspileCache::new(256),
+            shared_ctx,
             depth: Cell::new(0),
             deadline,
             timed_out,
@@ -70,6 +83,31 @@ impl Engine {
     /// Whether the last eval was aborted by the wall-clock guard.
     pub fn timed_out(&self) -> bool {
         self.timed_out.get()
+    }
+
+    /// The persistent realm, if this engine has one (shared mode).
+    pub fn shared_ctx(&self) -> Option<&Context> {
+        self.shared_ctx.as_ref()
+    }
+
+    /// Run `f` inside an eval realm: the persistent one in shared mode, or a
+    /// fresh, single-use realm in isolated mode. The realm's `Ctx` is published
+    /// on the current-context stack for the duration so PHP-side callbacks
+    /// (and the GC `Drop` cleanup) re-use it instead of re-locking the runtime.
+    pub fn eval_in<R>(&self, f: impl FnOnce(&Ctx<'_>) -> R) -> rquickjs::Result<R> {
+        fn run<R>(ctx: &Context, f: impl FnOnce(&Ctx<'_>) -> R) -> R {
+            ctx.with(|c| {
+                let _guard = push_ctx(&c);
+                f(&c)
+            })
+        }
+        match &self.shared_ctx {
+            Some(ctx) => Ok(run(ctx, f)),
+            None => {
+                let ctx = Context::full(&self.rt)?;
+                Ok(run(&ctx, f))
+            }
+        }
     }
 
     /// Enter one level of cross-boundary nesting; errors if the cap is hit.
@@ -111,16 +149,22 @@ thread_local! {
         const { std::cell::RefCell::new(Vec::new()) };
 }
 
-/// Push the current context for the duration of a host call.
-pub fn push_ctx(ctx: &Ctx<'_>) {
+/// Publish the current context on the stack until the returned guard drops.
+#[must_use]
+pub fn push_ctx(ctx: &Ctx<'_>) -> CtxGuard {
     CTX_STACK.with(|s| s.borrow_mut().push(ctx.as_raw()));
+    CtxGuard
 }
 
-/// Pop the current context when a host call returns.
-pub fn pop_ctx() {
-    CTX_STACK.with(|s| {
-        s.borrow_mut().pop();
-    });
+/// RAII guard that pops the current context when dropped (even on unwind).
+pub struct CtxGuard;
+
+impl Drop for CtxGuard {
+    fn drop(&mut self) {
+        CTX_STACK.with(|s| {
+            s.borrow_mut().pop();
+        });
+    }
 }
 
 /// The innermost active context, if a host call is currently on the stack.

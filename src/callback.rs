@@ -23,6 +23,20 @@ impl JsCallback {
     pub fn new(id: u64, engine: Rc<Engine>) -> Self {
         JsCallback { id, engine }
     }
+}
+
+impl Drop for JsCallback {
+    /// Queue this callback's registry entry for release. Deletion is deferred
+    /// (not done here) and flushed at the next eval boundary: a JS function can
+    /// be round-tripped PHP->JS within a single host call, dropping a transient
+    /// wrapper while JS still needs the entry, so deleting eagerly would race.
+    /// Queuing touches no JS and cannot re-enter the engine.
+    fn drop(&mut self) {
+        self.engine.state.queue_fn_deletion(self.id);
+    }
+}
+
+impl JsCallback {
 
     /// Invoke the underlying JS function with the given (already PHP-side) args.
     fn invoke_inner(&self, args: &[&Zval]) -> PhpResult<Zval> {
@@ -60,13 +74,20 @@ impl JsCallback {
         };
 
         // Reuse the live context if we are nested inside a host call; otherwise
-        // acquire the runtime lock. Reusing avoids a deadlock from re-locking.
+        // acquire the runtime lock on the persistent realm. Reusing avoids a
+        // deadlock from re-locking.
         match current_ctx_ptr() {
             Some(ptr) => {
                 let ctx = unsafe { Ctx::from_raw(ptr) };
                 run(&ctx)
             }
-            None => self.engine.ctx.with(|ctx| run(&ctx)),
+            None => match self.engine.shared_ctx() {
+                Some(ctx) => ctx.with(|c| run(&c)),
+                // Isolated mode: the realm that owned this callback is gone.
+                None => Err(PhpException::default(
+                    "JS callback invoked outside its eval (isolated QuickJS instance)".to_owned(),
+                )),
+            },
         }
     }
 }

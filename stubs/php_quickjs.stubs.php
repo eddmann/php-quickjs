@@ -13,8 +13,9 @@ class QuickJS
      * @param int|null $memoryLimit Max heap bytes (0/null = unbounded).
      * @param int|null $timeoutMs   Per-eval wall-clock budget in ms (0/null = unbounded).
      * @param int|null $maxStack    Max native stack bytes (0/null = engine default).
+     * @param bool     $isolated    Run each eval() in its own fresh global realm.
      */
-    public function __construct(?int $memoryLimit = null, ?int $timeoutMs = null, ?int $maxStack = null) {}
+    public function __construct(?int $memoryLimit = null, ?int $timeoutMs = null, ?int $maxStack = null, bool $isolated = false) {}
 
     /**
      * Register a PHP callable under a flat, dotted capability name, callable

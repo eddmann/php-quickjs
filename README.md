@@ -53,8 +53,9 @@ php -d extension=$(pwd)/target/release/libphp_quickjs.so script.php
 
 ## API
 
-### `new QuickJS(?int $memoryLimit = null, ?int $timeoutMs = null, ?int $maxStack = null)`
+### `new QuickJS(?int $memoryLimit = null, ?int $timeoutMs = null, ?int $maxStack = null, bool $isolated = false)`
 All limits default to unbounded; pass non-zero values to contain resource abuse.
+`isolated: true` runs each `eval()` in a fresh realm (see [Execution scope](#execution-scope)).
 
 ### `register(string $name, callable $fn, ?string $types = null): void`
 Expose a PHP callable to JS under a flat, dotted name. The name becomes
@@ -157,10 +158,27 @@ in later without reshaping this pipeline.
 
 ### Execution scope
 
-All `eval()` calls on one `QuickJS` instance share a single, persistent global
-scope (like a REPL session): top-level `var`/`let`/`const`/`function` and
-`globalThis` carry over between calls, so re-declaring the same top-level binding
-throws. Create a **new `QuickJS` instance** for an isolated world.
+By default, all `eval()` calls on one `QuickJS` instance share a single,
+persistent global realm (like a REPL session): top-level
+`var`/`let`/`const`/`function` and `globalThis` carry over between calls, and a
+JS function handed to PHP stays callable for the instance's lifetime (its
+registry entry is freed when the PHP `Js\Callback` is garbage-collected).
+
+Pass `isolated: true` to run **each `eval()` in its own fresh realm** — a
+stateless script runner:
+
+```php
+$js = new QuickJS(isolated: true);
+$js->eval('const k = 1;');
+$js->eval('const k = 2;');     // no redeclaration clash — different world
+$js->eval('typeof k;');        // "undefined"
+```
+
+In isolated mode, registered capabilities, handles, marshaling and
+*synchronous* callbacks all work as normal, but a JS callback **cannot outlive
+the `eval()` that created it** (its realm is discarded) — invoking a stored one
+later throws. Choose per intent: the instance is the unit of isolation, and
+`isolated: true` shrinks it to a single eval.
 
 ## Value marshaling
 

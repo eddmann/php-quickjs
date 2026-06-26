@@ -7,7 +7,7 @@
 //! callable, and returns the msgpack-encoded result. Adding a capability never
 //! changes this ABI.
 
-use crate::engine::{pop_ctx, push_ctx, Engine};
+use crate::engine::{push_ctx, Engine};
 use crate::error::{throw_host_error, HostError};
 use crate::handles::HandleTable;
 use crate::manifest::ManifestEntry;
@@ -38,11 +38,23 @@ pub struct BridgeState {
     pub handles: HandleTable,
     /// Back-reference to the owning engine (for invoking JS callbacks).
     engine: RefCell<Weak<Engine>>,
+    /// JS-callback ids whose PHP wrapper was dropped, awaiting release from the
+    /// JS registry (deferred to the next eval boundary; see `JsCallback::drop`).
+    pending_fn_deletions: RefCell<Vec<u64>>,
 }
 
 impl BridgeState {
     pub fn new() -> Rc<Self> {
         Rc::new(Self::default())
+    }
+
+    /// Queue a JS-callback id for release at the next eval boundary.
+    pub fn queue_fn_deletion(&self, id: u64) {
+        self.pending_fn_deletions.borrow_mut().push(id);
+    }
+
+    fn take_pending_deletions(&self) -> Vec<u64> {
+        std::mem::take(&mut self.pending_fn_deletions.borrow_mut())
     }
 
     pub fn set_engine(&self, engine: Weak<Engine>) {
@@ -169,9 +181,10 @@ pub fn install<'js>(ctx: &Ctx<'js>, state: Rc<BridgeState>) -> rquickjs::Result<
                 .as_bytes()
                 .ok_or_else(|| Exception::throw_type(&ctx, "__host args must be a Uint8Array"))?;
             let args = decode_args(bytes).map_err(|e| Exception::throw_type(&ctx, &e))?;
-            push_ctx(&ctx);
-            let result = host_call(&host_state, &name, args);
-            pop_ctx();
+            let result = {
+                let _guard = push_ctx(&ctx);
+                host_call(&host_state, &name, args)
+            };
             match result {
                 Ok(r) => encode_result(&ctx, r),
                 Err(err) => Err(throw_host_error(&ctx, &err)),
@@ -189,9 +202,10 @@ pub fn install<'js>(ctx: &Ctx<'js>, state: Rc<BridgeState>) -> rquickjs::Result<
                 .as_bytes()
                 .ok_or_else(|| Exception::throw_type(&ctx, "__php_invoke args must be a Uint8Array"))?;
             let args = decode_args(bytes).map_err(|e| Exception::throw_type(&ctx, &e))?;
-            push_ctx(&ctx);
-            let result = php_fn_call(&php_state, id as u64, args);
-            pop_ctx();
+            let result = {
+                let _guard = push_ctx(&ctx);
+                php_fn_call(&php_state, id as u64, args)
+            };
             match result {
                 Ok(r) => encode_result(&ctx, r),
                 Err(err) => Err(throw_host_error(&ctx, &err)),
@@ -204,6 +218,16 @@ pub fn install<'js>(ctx: &Ctx<'js>, state: Rc<BridgeState>) -> rquickjs::Result<
     ctx.eval::<(), _>(MSGPACK_JS)?;
     ctx.eval::<(), _>(RUNTIME_JS)?;
     ctx.eval::<(), _>(build_facade(&state.names()))?;
+
+    // Release JS callbacks whose PHP wrappers were dropped since the last eval.
+    let stale = state.take_pending_deletions();
+    if !stale.is_empty() {
+        if let Ok(del) = globals.get::<_, Function>("__deleteJsFn") {
+            for id in stale {
+                let _ = del.call::<_, ()>((id as f64,));
+            }
+        }
+    }
     Ok(())
 }
 

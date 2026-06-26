@@ -5,8 +5,8 @@
 // It must stay byte-compatible with the Rust `MiddleValue` serde impl
 // (src/marshal.rs), which reads/writes *native* msgpack types.
 //
-// Installed as globalThis.__mp = { encode, decode }.
-(function () {
+// Installed once per realm as globalThis.__mp = { encode, decode }.
+if (!globalThis.__mp) (function () {
   "use strict";
 
   // QuickJS has no TextEncoder/TextDecoder (those are WHATWG, not ES), so

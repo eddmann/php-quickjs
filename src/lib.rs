@@ -36,16 +36,21 @@ impl QuickJS {
     /// - `memoryLimit`: max heap bytes (alloc-bomb guard)
     /// - `timeoutMs`: wall-clock budget per `eval` (infinite-loop guard)
     /// - `maxStack`: max native stack bytes
-    #[php(defaults(memoryLimit = None, timeoutMs = None, maxStack = None))]
+    /// - `isolated`: when true, each `eval()` runs in a fresh global realm (its
+    ///   own world); cross-eval globals and persistent JS callbacks are not
+    ///   kept. Defaults to false (one shared, persistent realm per instance).
+    #[php(defaults(memoryLimit = None, timeoutMs = None, maxStack = None, isolated = false))]
     pub fn __construct(
         memoryLimit: Option<i64>,
         timeoutMs: Option<i64>,
         maxStack: Option<i64>,
+        isolated: bool,
     ) -> PhpResult<Self> {
         let engine = Engine::new(
             memoryLimit.unwrap_or(0).max(0) as usize,
             timeoutMs.unwrap_or(0).max(0) as u64,
             maxStack.unwrap_or(0).max(0) as usize,
+            isolated,
         )
         .map_err(to_php_err)?;
         Ok(QuickJS { engine })
@@ -89,22 +94,24 @@ impl QuickJS {
 
         let state = self.engine.state.clone();
         self.engine.arm_deadline();
-        let result = self.engine.ctx.with(|ctx| {
+        let outcome = self.engine.eval_in(|ctx| {
             let map = module.map_json.clone();
-            let eval_err =
-                |e| self.classify_js_error(&ctx, e, map.as_deref(), &module.module_id);
-            bridge::install(&ctx, state.clone()).map_err(&eval_err)?;
+            let eval_err = |e| self.classify_js_error(ctx, e, map.as_deref(), &module.module_id);
+            bridge::install(ctx, state.clone()).map_err(&eval_err)?;
             // Name the module so stack frames are attributable and remappable.
             let mut opts = rquickjs::context::EvalOptions::default();
             opts.filename = Some(module.module_id.clone());
             let value: rquickjs::Value = ctx
                 .eval_with_options(module.js.as_bytes(), opts)
                 .map_err(&eval_err)?;
-            let middle = js_to_middle(&ctx, value, &state).map_err(&eval_err)?;
+            let middle = js_to_middle(ctx, value, &state).map_err(&eval_err)?;
             middle_to_zval(&middle, &state).map_err(PhpException::default)
         });
         self.engine.disarm_deadline();
-        result
+        match outcome {
+            Ok(r) => r,
+            Err(e) => Err(to_php_err(e)),
+        }
     }
 
     /// Return the registration manifest as an array of `['name'=>..., 'types'=>...]`.
@@ -165,14 +172,18 @@ impl QuickJS {
     pub fn roundtrip(&self, value: &Zval) -> PhpResult<Zval> {
         let state = self.engine.state.clone();
         let middle = zval_to_middle(value, &state).map_err(PhpException::default)?;
-        self.engine.ctx.with(|ctx| {
+        let outcome = self.engine.eval_in(|ctx| {
             // Runtime support must exist for any function reconstruction.
-            bridge::install(&ctx, state.clone())
-                .map_err(|e| PhpException::default(error::js_error_message(&ctx, e)))?;
-            let js = middle_to_js(&ctx, &middle, &state).map_err(to_php_err)?;
-            let back = js_to_middle(&ctx, js, &state).map_err(to_php_err)?;
+            bridge::install(ctx, state.clone())
+                .map_err(|e| PhpException::default(error::js_error_message(ctx, e)))?;
+            let js = middle_to_js(ctx, &middle, &state).map_err(to_php_err)?;
+            let back = js_to_middle(ctx, js, &state).map_err(to_php_err)?;
             middle_to_zval(&back, &state).map_err(PhpException::default)
-        })
+        });
+        match outcome {
+            Ok(r) => r,
+            Err(e) => Err(to_php_err(e)),
+        }
     }
 }
 

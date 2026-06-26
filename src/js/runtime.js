@@ -6,7 +6,13 @@
 //
 // `wrap` replaces functions with refs before encoding; `unwrap` replaces refs
 // with callables after decoding. The host (Rust) sees only the tagged refs.
-globalThis.__rt = (function () {
+//
+// Installed once per realm: the guard keeps the JS-side function registry
+// (`jsFns`) alive across re-installs, so a JS function handed to PHP survives
+// for the life of the realm. Entries are freed when their Js\Callback is
+// garbage-collected (host calls `__deleteJsFn`).
+if (!globalThis.__rt) {
+  globalThis.__rt = (function () {
   "use strict";
   var mp = globalThis.__mp;
   var JSFN = "$__jsfn";
@@ -22,6 +28,9 @@ globalThis.__rt = (function () {
   }
   function getFn(id) {
     return jsFns[id];
+  }
+  function deleteFn(id) {
+    delete jsFns[id];
   }
 
   function isPlainContainer(v) {
@@ -98,14 +107,23 @@ globalThis.__rt = (function () {
   // JS directly (e.g. QuickJS::roundtrip of a function).
   globalThis.__getJsFn = getFn;
   globalThis.__makePhpFn = makePhpFn;
+  // Called when a PHP-side Js\Callback is garbage-collected, to release its
+  // entry from the registry.
+  globalThis.__deleteJsFn = deleteFn;
+  // Test/diagnostic helper: number of live JS callbacks held for PHP.
+  globalThis.__jsFnCount = function () {
+    return Object.keys(jsFns).length;
+  };
 
   return {
     registerFn: registerFn,
     getFn: getFn,
+    deleteFn: deleteFn,
     wrap: wrap,
     unwrap: unwrap,
     callHost: callHost,
     callPhp: callPhp,
     invokeJs: invokeJs,
   };
-})();
+  })();
+}
