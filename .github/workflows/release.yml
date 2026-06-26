@@ -26,15 +26,14 @@ jobs:
   linux:
     name: linux ${{ matrix.arch }} · php ${{ matrix.php }}
     runs-on: ${{ matrix.runner }}
-    continue-on-error: ${{ matrix.experimental || false }}
     strategy:
       fail-fast: false
       matrix:
         include:
           - { php: '8.4', arch: x86_64,  runner: ubuntu-22.04 }
           - { php: '8.4', arch: aarch64, runner: ubuntu-22.04-arm }
-          - { php: '8.5', arch: x86_64,  runner: ubuntu-22.04,     experimental: true }
-          - { php: '8.5', arch: aarch64, runner: ubuntu-22.04-arm, experimental: true }
+          - { php: '8.5', arch: x86_64,  runner: ubuntu-22.04 }
+          - { php: '8.5', arch: aarch64, runner: ubuntu-22.04-arm }
     steps:
       - uses: actions/checkout@v4
       - uses: shivammathur/setup-php@v2
@@ -63,25 +62,26 @@ jobs:
   lambda-bref:
     name: lambda/bref ${{ matrix.arch }} · php ${{ matrix.php }}
     runs-on: ${{ matrix.runner }}
-    continue-on-error: ${{ matrix.experimental || false }}
     strategy:
       fail-fast: false
       matrix:
+        # Bref publishes separate per-arch build images: bref/build-php-XX
+        # (x86_64) and bref/arm-build-php-XX (arm64).
         include:
-          - { php: '8.4', short: '84', arch: x86_64, runner: ubuntu-22.04 }
-          - { php: '8.4', short: '84', arch: arm64,  runner: ubuntu-22.04-arm }
-          - { php: '8.5', short: '85', arch: x86_64, runner: ubuntu-22.04,     experimental: true }
-          - { php: '8.5', short: '85', arch: arm64,  runner: ubuntu-22.04-arm, experimental: true }
+          - { php: '8.4', arch: x86_64, runner: ubuntu-22.04,     image: bref/build-php-84 }
+          - { php: '8.4', arch: arm64,  runner: ubuntu-22.04-arm, image: bref/arm-build-php-84 }
+          - { php: '8.5', arch: x86_64, runner: ubuntu-22.04,     image: bref/build-php-85 }
+          - { php: '8.5', arch: arm64,  runner: ubuntu-22.04-arm, image: bref/arm-build-php-85 }
     steps:
       - uses: actions/checkout@v4
 
       # Build in the Bref build image via `docker run` (rather than a job
-      # `container:`) so checkout/runner tooling stays on the host. The image is
-      # multi-arch, so the arm64 runner produces an arm64 binary natively.
-      - name: Build in Bref image (bref/build-php-${{ matrix.short }})
+      # `container:`) so checkout/runner tooling stays on the host. The arm64
+      # runner pulls the arm64 Bref image and builds an arm64 binary natively.
+      - name: Build in Bref image (${{ matrix.image }})
         run: |
           docker run --rm -v "$PWD":/src --entrypoint /bin/bash \
-            "bref/build-php-${{ matrix.short }}" -lc '
+            "${{ matrix.image }}" -lc '
               set -euo pipefail
               dnf install -y clang
               curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs \
@@ -119,15 +119,14 @@ jobs:
   macos:
     name: macos ${{ matrix.arch }} · php ${{ matrix.php }}
     runs-on: ${{ matrix.runner }}
-    continue-on-error: ${{ matrix.experimental || false }}
     strategy:
       fail-fast: false
       matrix:
         include:
           - { php: '8.4', arch: arm64,  runner: macos-14 }
           - { php: '8.4', arch: x86_64, runner: macos-13 }
-          - { php: '8.5', arch: arm64,  runner: macos-14, experimental: true }
-          - { php: '8.5', arch: x86_64, runner: macos-13, experimental: true }
+          - { php: '8.5', arch: arm64,  runner: macos-14 }
+          - { php: '8.5', arch: x86_64, runner: macos-13 }
     steps:
       - uses: actions/checkout@v4
       - uses: shivammathur/setup-php@v2
@@ -151,7 +150,6 @@ jobs:
   release:
     name: publish release
     needs: [linux, lambda-bref, macos]
-    if: always() # publish whatever built (8.5 legs may be allowed to fail)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4

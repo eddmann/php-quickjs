@@ -92,7 +92,8 @@ make test         # optional: Rust unit tests + PHP suite
 ```
 
 To build a Lambda-compatible binary locally, build inside the Bref image so it
-links against Amazon Linux's glibc:
+links against Amazon Linux's glibc. Use `bref/build-php-8x` for x86_64 and
+`bref/arm-build-php-8x` for arm64 (and the matching PHP version):
 
 ```sh
 docker run --rm -v "$PWD":/src --entrypoint /bin/bash bref/build-php-84 -lc '
