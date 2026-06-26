@@ -46,9 +46,15 @@ jobs:
       # whose emmintrin.h trips a bindgen SSE2 intrinsics bug when parsing the
       # PHP headers on x86_64. clang 15+ fixes it; aarch64 never hits it.
       - run: sudo apt-get update && sudo apt-get install -y clang-15 libclang-15-dev
-      - run: cargo build --release
-        env:
-          LIBCLANG_PATH: /usr/lib/llvm-15/lib
+      - name: Build
+        run: |
+          # Point bindgen at libclang-15 specifically (the runner also ships
+          # libclang-14; a wrong/empty LIBCLANG_PATH silently falls back to it
+          # and re-triggers the emmintrin bug). Locate the real .so by version.
+          dir="$(dirname "$(find /usr/lib /usr/lib64 -name 'libclang-15.so*' -print -quit 2>/dev/null)")"
+          [ -n "$dir" ] && [ "$dir" != "." ] || { echo "::error::libclang-15 not found"; exit 1; }
+          echo "Using LIBCLANG_PATH=$dir"
+          LIBCLANG_PATH="$dir" cargo build --release
       - name: Stage artifact
         run: |
           mkdir -p dist
@@ -99,6 +105,10 @@ jobs:
               export PATH="$HOME/.cargo/bin:/opt/bin:$PATH"
               export CARGO_TARGET_DIR=/tmp/target
               export LIBCLANG_PATH=/usr/lib64
+              # ext-php-rs locates PHP by shelling out to `which`, which the
+              # minimal AL2023 image does not ship; point it at Bref'\''s PHP
+              # directly so detection does not depend on `which`.
+              export PHP=/opt/bin/php PHP_CONFIG=/opt/bin/php-config
               cd /src
               cargo build --release          # rust-toolchain.toml pins the version
               mkdir -p dist

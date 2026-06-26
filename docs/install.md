@@ -104,6 +104,8 @@ docker run --rm --security-opt seccomp=unconfined \
   curl --proto "=https" -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain none
   export PATH="$HOME/.cargo/bin:/opt/bin:$PATH" CARGO_TARGET_DIR=/tmp/target
   export LIBCLANG_PATH=/usr/lib64
+  # The minimal image has no `which`; point ext-php-rs at PHP directly.
+  export PHP=/opt/bin/php PHP_CONFIG=/opt/bin/php-config
   cd /src && cargo build --release
   cp /tmp/target/release/libphp_quickjs.so /src/quickjs.so
 '
