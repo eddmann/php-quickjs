@@ -48,13 +48,18 @@ jobs:
       - run: sudo apt-get update && sudo apt-get install -y clang-15 libclang-15-dev
       - name: Build
         run: |
-          # Point bindgen at libclang-15 specifically (the runner also ships
-          # libclang-14; a wrong/empty LIBCLANG_PATH silently falls back to it
-          # and re-triggers the emmintrin bug). Locate the real .so by version.
+          # The clang-14 emmintrin.h SSE2 bug is triggered by the *resource
+          # directory* (the compiler's builtin headers), not by which libclang
+          # loads — so pointing LIBCLANG_PATH at v15 isn't enough; bindgen still
+          # picks up clang-14's headers. Force clang-15's resource dir via
+          # bindgen's extra-args env, which pins emmintrin.h to the fixed copy.
           dir="$(dirname "$(find /usr/lib /usr/lib64 -name 'libclang-15.so*' -print -quit 2>/dev/null)")"
           [ -n "$dir" ] && [ "$dir" != "." ] || { echo "::error::libclang-15 not found"; exit 1; }
-          echo "Using LIBCLANG_PATH=$dir"
-          LIBCLANG_PATH="$dir" cargo build --release
+          export LIBCLANG_PATH="$dir"
+          export BINDGEN_EXTRA_CLANG_ARGS="-resource-dir=$(clang-15 -print-resource-dir)"
+          echo "LIBCLANG_PATH=$LIBCLANG_PATH"
+          echo "BINDGEN_EXTRA_CLANG_ARGS=$BINDGEN_EXTRA_CLANG_ARGS"
+          cargo build --release
       - name: Stage artifact
         run: |
           mkdir -p dist
