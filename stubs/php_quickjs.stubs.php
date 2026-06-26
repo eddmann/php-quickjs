@@ -63,8 +63,18 @@ namespace {
     /** Base class for every exception thrown by the extension. */
     class QuickJSException extends \Exception {}
 
-    /** A JavaScript error escaped `eval`. */
-    class QuickJSEvalException extends QuickJSException {}
+    /**
+     * A JavaScript/TypeScript error escaped `eval`. `getMessage()` is the clean
+     * error text and `getFile()`/`getLine()` carry the original TS location.
+     */
+    class QuickJSEvalException extends QuickJSException
+    {
+        /** The JS error constructor name (e.g. "TypeError"), or the PHP class for a re-surfaced host error. */
+        public function getJsName(): string {}
+
+        /** The stack trace, remapped to TypeScript coordinates and filtered to guest frames. */
+        public function getJsStack(): string {}
+    }
 
     /** The wall-clock deadline tripped during `eval`. */
     class QuickJSTimeoutException extends QuickJSException {}

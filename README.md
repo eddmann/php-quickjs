@@ -126,26 +126,41 @@ eval(tsSource)
 - **esnext target.** A near-identity transform — just strip types. QuickJS-NG
   natively supports private fields, nullish, optional chaining, etc., so nothing
   is downleveled and source maps stay tight.
-- **Erasable-only.** Type annotations, `interface`, `type`, generics and `as`
-  casts erase cleanly (isolatedModules semantics). TS that emits *runtime* code
-  (plain `enum`, legacy decorators, namespaces) is not part of the supported
-  subset.
-- **Errors map back to TS.** A guest throw is reported at its original TS
-  line/column even when type erasure shifted the generated JS:
+- **Full TS transform.** Type annotations, `interface`, `type`, generics and
+  `as` casts erase to nothing; constructs that emit runtime code — `enum`,
+  `namespace`, decorators — are transformed by oxc and work (the esbuild/Bun
+  model). There is no separate type-erasure-only mode.
+- **Errors map back to TS.** A guest throw becomes a `QuickJSEvalException`
+  whose `getFile()`/`getLine()` are the original TS location and whose
+  `getJsStack()` is the remapped, guest-only stack — even when type erasure
+  shifted the generated JS:
 
   ```php
   try {
       $js->eval("interface Foo { a: number }\n\nthrow new Error('boom');");
   } catch (QuickJSEvalException $e) {
-      echo $e->getMessage();   // "boom (guest.ts:3:7)\n    at <eval> (guest.ts:3:7)"
+      $e->getMessage();   // "boom"
+      $e->getLine();      // 3   (original TS line, not generated JS line 1)
+      $e->getJsName();    // "Error"
+      $e->getJsStack();   // "    at <eval> (guest.ts:3:7)"
   }
   ```
 
+  Syntax errors are located too (`getLine()` + `getJsName() === 'SyntaxError'`),
+  and a non-`Error` `throw` (object/array/number) is JSON-rendered into the
+  message rather than dropped.
 - **Source maps never enter the sandbox** — they are kept host-side, keyed by
   content hash, and used only when remapping an error.
 
 Type-*checking* (e.g. a bundled `tsgo`) is intentionally absent and can be slotted
 in later without reshaping this pipeline.
+
+### Execution scope
+
+All `eval()` calls on one `QuickJS` instance share a single, persistent global
+scope (like a REPL session): top-level `var`/`let`/`const`/`function` and
+`globalThis` carry over between calls, so re-declaring the same top-level binding
+throws. Create a **new `QuickJS` instance** for an isolated world.
 
 ## Value marshaling
 

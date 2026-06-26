@@ -64,13 +64,31 @@ try {
     eq('TypeError', $e->getJsName(), 'JS error name is TypeError');
 }
 
-// --- Transpile / syntax errors ------------------------------------------
+// --- Transpile / syntax errors are located ------------------------------
 throws(fn() => $js->eval('const = ;'), 'QuickJSEvalException', 'invalid syntax surfaces as QuickJSEvalException');
 try {
-    $js->eval('function ( {');
+    // Error is on line 3; the diagnostic must point there, not line 1.
+    $js->eval("const a = 1;\nconst b = 2;\nconst = ;");
     ok(false, 'expected throw');
 } catch (QuickJSEvalException $e) {
     ok($e->getMessage() !== '', 'transpile error carries a diagnostic message');
+    eq('guest.ts', $e->getFile(), 'transpile error has a file');
+    eq(3, $e->getLine(), 'transpile error located at the offending TS line');
+    eq('SyntaxError', $e->getJsName(), 'transpile error is named SyntaxError');
+}
+
+// --- Non-Error throws are surfaced, not dropped --------------------------
+try {
+    $js->eval("throw { code: 42, reason: 'nope' };");
+    ok(false, 'expected throw');
+} catch (QuickJSEvalException $e) {
+    ok(str_contains($e->getMessage(), '"code":42'), 'thrown object is JSON-rendered (got: ' . $e->getMessage() . ')');
+}
+try {
+    $js->eval('throw [1, 2, 3];');
+    ok(false, 'expected throw');
+} catch (QuickJSEvalException $e) {
+    eq('[1,2,3]', $e->getMessage(), 'thrown array is JSON-rendered');
 }
 
 // --- Cache correctness ---------------------------------------------------

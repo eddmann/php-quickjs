@@ -7,6 +7,8 @@
 //!   et al.) carrying the JS error's name, message and stack.
 
 use ext_php_rs::error::Error as PhpError;
+use ext_php_rs::exception::PhpException;
+use ext_php_rs::zend::ClassEntry;
 use rquickjs::{Ctx, Error as JsError, Exception, Object};
 
 /// A host-side failure carried back to JS: the originating class (a PHP
@@ -67,6 +69,9 @@ pub struct JsErrorParts {
     pub message: String,
     /// The JS stack (generated-JS coordinates), if any.
     pub stack: Option<String>,
+    /// The originating PHP exception class, if this error re-surfaced a host
+    /// exception (set by `throw_host_error`).
+    pub php_class: Option<String>,
 }
 
 impl JsErrorParts {
@@ -85,7 +90,7 @@ pub fn js_error_message(ctx: &Ctx<'_>, err: JsError) -> String {
     js_error_parts(ctx, err).display_message()
 }
 
-/// Decompose a thrown JS error into name / message / stack.
+/// Decompose a thrown JS error into name / message / stack / php_class.
 pub fn js_error_parts(ctx: &Ctx<'_>, err: JsError) -> JsErrorParts {
     match err {
         JsError::Exception => {
@@ -96,20 +101,31 @@ pub fn js_error_parts(ctx: &Ctx<'_>, err: JsError) -> JsErrorParts {
                     .ok()
                     .flatten()
                     .unwrap_or_else(|| "Error".to_owned());
+                let php_class = ex.get::<_, Option<String>>("phpClass").ok().flatten();
                 JsErrorParts {
                     name,
                     message: ex.message().unwrap_or_default(),
                     stack: ex.stack(),
+                    php_class,
                 }
             } else {
+                // A thrown non-Error value: a string as-is, anything else (an
+                // object, number, ...) rendered via JSON so it is not lost.
                 let message = val
                     .as_string()
                     .and_then(|s| s.to_string().ok())
+                    .or_else(|| {
+                        ctx.json_stringify(val.clone())
+                            .ok()
+                            .flatten()
+                            .and_then(|s| s.to_string().ok())
+                    })
                     .unwrap_or_else(|| "uncaught JS exception".to_owned());
                 JsErrorParts {
                     name: "Error".to_owned(),
                     message,
                     stack: None,
+                    php_class: None,
                 }
             }
         }
@@ -117,8 +133,24 @@ pub fn js_error_parts(ctx: &Ctx<'_>, err: JsError) -> JsErrorParts {
             name: "Error".to_owned(),
             message: other.to_string(),
             stack: None,
+            php_class: None,
         },
     }
+}
+
+/// Convert a JS error caught while invoking a PHP-held JS callback into a PHP
+/// exception. If the JS error re-surfaced a host exception (carries
+/// `phpClass`), the original PHP class is restored with a clean message;
+/// otherwise it becomes a `QuickJSEvalException`. This unwraps the
+/// JS->PHP->JS->PHP round trip instead of nesting `Exception:` prefixes.
+pub fn js_error_to_php(ctx: &Ctx<'_>, err: JsError) -> PhpException {
+    let parts = js_error_parts(ctx, err);
+    if let Some(class) = parts.php_class.as_deref() {
+        if let Some(ce) = ClassEntry::try_find(class) {
+            return PhpException::new(parts.message, 0, ce);
+        }
+    }
+    PhpException::from_class::<crate::exceptions::QuickJSEvalException>(parts.display_message())
 }
 
 /// Remap a JS stack back to TypeScript coordinates, keeping only guest frames.

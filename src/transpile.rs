@@ -29,12 +29,24 @@ pub struct Transpiled {
     pub map_json: Option<Rc<str>>,
 }
 
+/// A transpile (parse/transform) failure, located in the original TS source.
+#[derive(Debug, Clone)]
+pub struct TranspileError {
+    pub message: String,
+    /// 1-based line/column of the first diagnostic (0 if unknown).
+    pub line: u32,
+    pub col: u32,
+}
+
 /// Transpile TS -> JS. `module_id` names the module (used as the codegen source
 /// path and the QuickJS filename, so stack frames are attributable). Returns a
-/// formatted diagnostic string on parse/transform failure.
-pub fn transpile(source: &str, module_id: &str) -> Result<(String, Option<String>), String> {
-    let options = TransformOptions::from_target("esnext")
-        .map_err(|e| format!("invalid transform target: {e}"))?;
+/// located [`TranspileError`] on parse/transform failure.
+pub fn transpile(source: &str, module_id: &str) -> Result<(String, Option<String>), TranspileError> {
+    let options = TransformOptions::from_target("esnext").map_err(|e| TranspileError {
+        message: format!("invalid transform target: {e}"),
+        line: 0,
+        col: 0,
+    })?;
     let mut compiler = TsCompiler {
         options,
         code: None,
@@ -43,13 +55,34 @@ pub fn transpile(source: &str, module_id: &str) -> Result<(String, Option<String
     };
     compiler.compile(source, SourceType::ts(), Path::new(module_id));
 
-    if !compiler.errors.is_empty() {
-        return Err(compiler.errors.join("\n"));
+    if let Some((message, offset)) = compiler.errors.into_iter().next() {
+        let (line, col) = offset.map_or((0, 0), |o| line_col(source, o));
+        return Err(TranspileError { message, line, col });
     }
-    let code = compiler
-        .code
-        .ok_or_else(|| "transpiler produced no output".to_owned())?;
+    let code = compiler.code.ok_or_else(|| TranspileError {
+        message: "transpiler produced no output".to_owned(),
+        line: 0,
+        col: 0,
+    })?;
     Ok((code, compiler.map_json))
+}
+
+/// Compute the 1-based (line, column) of a byte offset within `source`.
+fn line_col(source: &str, offset: usize) -> (u32, u32) {
+    let mut line = 1u32;
+    let mut col = 1u32;
+    for (i, ch) in source.char_indices() {
+        if i >= offset {
+            break;
+        }
+        if ch == '\n' {
+            line += 1;
+            col = 1;
+        } else {
+            col += 1;
+        }
+    }
+    (line, col)
 }
 
 /// An oxc compiler pipeline configured for type-stripping + source maps. The
@@ -59,7 +92,8 @@ struct TsCompiler {
     options: TransformOptions,
     code: Option<String>,
     map_json: Option<String>,
-    errors: Vec<String>,
+    /// First-seen-first diagnostics as `(message, byte offset of its span)`.
+    errors: Vec<(String, Option<usize>)>,
 }
 
 impl CompilerInterface for TsCompiler {
@@ -77,7 +111,9 @@ impl CompilerInterface for TsCompiler {
 
     fn handle_errors(&mut self, errors: Diagnostics) {
         for e in errors {
-            self.errors.push(e.to_string());
+            // The first label's span gives the source location of the problem.
+            let offset = (&e.labels).into_iter().next().map(|l| l.offset() as usize);
+            self.errors.push((e.to_string(), offset));
         }
     }
 
@@ -113,7 +149,7 @@ impl TranspileCache {
     /// Return the transpiled form of `source`, transpiling and caching on miss.
     /// The cache key is a content hash; the stored source is compared on a hit
     /// to rule out a hash collision returning the wrong JS.
-    pub fn get_or_transpile(&self, source: &str) -> Result<Transpiled, String> {
+    pub fn get_or_transpile(&self, source: &str) -> Result<Transpiled, TranspileError> {
         let key = hash(source);
         if let Some(hit) = self.inner.borrow_mut().get(&key) {
             if hit.source == source {
@@ -166,9 +202,12 @@ mod tests {
     }
 
     #[test]
-    fn syntax_error_is_reported() {
-        let err = transpile("const = ;", "m.ts").unwrap_err();
-        assert!(!err.is_empty());
+    fn syntax_error_is_located() {
+        // The error should carry a message and a 1-based line/col.
+        let err = transpile("const a = 1;\nconst = ;", "m.ts").unwrap_err();
+        assert!(!err.message.is_empty());
+        assert_eq!(err.line, 2, "error is on the second line");
+        assert!(err.col > 0);
     }
 
     #[test]

@@ -58,6 +58,19 @@ throws(
     'JS error inside a PHP-invoked callback surfaces to PHP'
 );
 
+// A PHP exception that round-trips PHP->JS->PHP keeps its original class and
+// a clean message (not a nested "Exception: ..." wrapper).
+$js->register('relay', fn(callable $fn) => $fn());
+$js->register('boomTyped', fn() => throw new \LogicException('typed boom'));
+try {
+    $js->eval('php.relay(() => php.boomTyped());');
+} catch (QuickJSException $e) {
+    eq('LogicException: typed boom', $e->getMessage(), 'round-tripped PHP exception is unwrapped');
+    if (method_exists($e, 'getJsName')) {
+        eq('LogicException', $e->getJsName(), 'original PHP class preserved as jsName');
+    }
+}
+
 // --- Engine remains usable after errors ---------------------------------
 eq(3, $js->eval('1 + 2'), 'engine still works after exceptions');
 

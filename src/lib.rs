@@ -19,7 +19,7 @@ mod sandbox;
 mod transpile;
 
 use engine::Engine;
-use exceptions::{QuickJSEvalException, QuickJSMemoryException, QuickJSTimeoutException};
+use exceptions::{QuickJSMemoryException, QuickJSTimeoutException};
 use marshal::{js_to_middle, middle_to_js, middle_to_zval, zval_to_middle};
 
 /// An embedded QuickJS sandbox with a typed, bidirectional PHP bridge.
@@ -70,12 +70,22 @@ impl QuickJS {
     /// `php.*` facade is installed fresh from the current manifest first.
     pub fn eval(&self, code: String) -> PhpResult<Zval> {
         // TypeScript fast path: transpile to JS (types erased, esnext) before
-        // QuickJS ever sees the source. Transpile/syntax errors surface here.
-        let module = self
-            .engine
-            .transpile
-            .get_or_transpile(&code)
-            .map_err(PhpException::from_class::<QuickJSEvalException>)?;
+        // QuickJS ever sees the source. Transpile/syntax errors surface here,
+        // located at their original TS line/column.
+        let module = self.engine.transpile.get_or_transpile(&code).map_err(|e| {
+            let stack = if e.line > 0 {
+                format!("    at guest.ts:{}:{}", e.line, e.col)
+            } else {
+                String::new()
+            };
+            exceptions::eval_exception(
+                "SyntaxError".to_owned(),
+                e.message,
+                "guest.ts",
+                e.line,
+                stack,
+            )
+        })?;
 
         let state = self.engine.state.clone();
         self.engine.arm_deadline();
