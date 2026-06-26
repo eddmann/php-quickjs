@@ -43,22 +43,35 @@ RUN echo 'extension=/usr/local/lib/php/quickjs.so' > /usr/local/etc/php/conf.d/q
 
 ## AWS Lambda (Bref)
 
-The `lambda-bref-*.zip` is a **Lambda layer**: it contains the extension plus a
-`conf.d` ini that enables it. Add it as a layer alongside the Bref runtime layer
-and the extension loads automatically.
+A Bref function is the runtime layer mounted at `/opt` plus your code at
+`/var/task`. PHP scans `*.ini` from `/opt/bref/etc/php/conf.d/` (layers) and your
+project's `php/conf.d/`; Bref's `extension_dir` is `/opt/bref/extensions`. The
+release artifacts follow that convention, so the **same `.so` + ini work whether
+you go via a layer or a Docker image**.
 
-In `serverless.yml`:
+Match the **architecture** (`arm64` for Graviton, `x86_64` otherwise) and the
+**PHP version** to your Bref runtime. There's a runnable skeleton (handler +
+`Dockerfile` + `serverless.yml`) in [`examples/lambda/`](../examples/lambda).
 
-```yaml
-functions:
-  api:
-    handler: index.php
-    runtime: php-84              # Bref PHP 8.4 runtime
-    layers:
-      - arn:aws:lambda:<region>:<account>:layer:php-quickjs-php84-arm64:<n>
+### Docker image (recommended for custom binaries)
+
+Bake the released `.so` into a `FROM bref/php-XX:3` image:
+
+```dockerfile
+FROM bref/php-84:3
+COPY php-quickjs-vX-php8.4-lambda-bref-arm64.so /opt/bref/extensions/quickjs.so
+RUN echo 'extension=quickjs.so' > /opt/bref/etc/php/conf.d/ext-quickjs.ini
+COPY . /var/task
 ```
 
-To create the layer from the released zip:
+Deploy it as a container image (`provider.ecr.images` + `functions.*.image` in
+`serverless.yml` — see the example).
+
+### Lambda layer (the `lambda-bref-*.zip`)
+
+The zip is a ready layer: it contains `bref/extensions/quickjs.so` and
+`bref/etc/php/conf.d/ext-quickjs.ini` (which simply says `extension=quickjs.so`).
+Publish it, then reference its ARN alongside the Bref runtime:
 
 ```sh
 aws lambda publish-layer-version \
@@ -67,14 +80,22 @@ aws lambda publish-layer-version \
   --zip-file fileb://php-quickjs-vX-php8.4-lambda-bref-arm64.zip
 ```
 
-Match the **architecture** (`arm64` for Graviton functions, `x86_64` otherwise)
-and the **PHP version** to your Bref runtime. The layer's internal layout
-(`/opt/php-quickjs/quickjs.so` + `/opt/bref/etc/php/conf.d/quickjs.ini`) follows
-Bref's ini scan path; if a future Bref changes that path, prefer the raw `.so`
-with your own `php/conf.d` entry in the project.
+```yaml
+functions:
+  api:
+    handler: index.php
+    runtime: php-84              # Bref PHP 8.4 runtime
+    architecture: arm64
+    layers:
+      - arn:aws:lambda:<region>:<account>:layer:php-quickjs-php84-arm64:<n>
+```
 
-Alternatively, skip the layer and vendor the raw `.so` in your project, enabling
-it via Bref's per-project config (`php/conf.d/php.ini`):
+AWS allows at most **5 layers** per function.
+
+### Vendor the raw `.so`
+
+Skip layers entirely — drop the `.so` in your project and enable it via Bref's
+per-project config:
 
 ```ini
 ; php/conf.d/php.ini

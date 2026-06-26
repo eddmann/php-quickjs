@@ -125,10 +125,14 @@ jobs:
       - name: Package Bref Lambda layer
         run: |
           ver="${{ inputs.version }}"; php="${{ matrix.php }}"; arch="${{ matrix.arch }}"
-          # Layer is mounted at /opt on Lambda; Bref scans /opt/bref/etc/php/conf.d.
-          mkdir -p layer/php-quickjs layer/bref/etc/php/conf.d
-          cp dist/quickjs.so layer/php-quickjs/quickjs.so
-          echo 'extension=/opt/php-quickjs/quickjs.so' > layer/bref/etc/php/conf.d/quickjs.ini
+          # Idiomatic Bref layout (matches brefphp/extra-php-extensions): the
+          # layer mounts at /opt, Bref's extension_dir is /opt/bref/extensions,
+          # and it scans /opt/bref/etc/php/conf.d for *.ini. So the .so drops in
+          # by bare name and the ini just says `extension=quickjs.so` — the same
+          # binary + ini then work identically in a Docker `FROM bref/php-*`.
+          mkdir -p layer/bref/extensions layer/bref/etc/php/conf.d
+          cp dist/quickjs.so layer/bref/extensions/quickjs.so
+          echo 'extension=quickjs.so' > layer/bref/etc/php/conf.d/ext-quickjs.ini
           ( cd layer && zip -qr "../php-quickjs-v${ver}-php${php}-lambda-bref-${arch}.zip" . )
           cp dist/quickjs.so "php-quickjs-v${ver}-php${php}-lambda-bref-${arch}.so"
 

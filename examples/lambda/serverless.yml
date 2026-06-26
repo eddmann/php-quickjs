@@ -1,0 +1,38 @@
+service: php-quickjs-demo
+
+provider:
+  name: aws
+  region: eu-west-1
+  architecture: arm64 # match the .so you ship (arm64 = Graviton, cheaper)
+
+  # ── Container-image deployment (this example's Dockerfile) ──────────────
+  # Bref builds the image from ./Dockerfile and pushes it to ECR.
+  ecr:
+    images:
+      app:
+        path: ./
+        file: Dockerfile
+        platform: linux/arm64
+        buildArgs:
+          EXT: php-quickjs-v0.0.1-php8.4-lambda-bref-arm64.so
+
+functions:
+  demo:
+    image:
+      name: app
+      command: index.php # the handler returned by index.php
+
+# ── Alternative: Lambda layer (the released .zip) instead of Docker ────────
+# Publish the layer once:
+#   aws lambda publish-layer-version \
+#     --layer-name php-quickjs-php84-arm64 --compatible-architectures arm64 \
+#     --zip-file fileb://php-quickjs-v0.0.1-php8.4-lambda-bref-arm64.zip
+# then drop the `ecr`/`image` blocks above and use the classic runtime + layers:
+#
+# functions:
+#   demo:
+#     handler: index.php
+#     runtime: php-84
+#     architecture: arm64
+#     layers:
+#       - arn:aws:lambda:<region>:<account>:layer:php-quickjs-php84-arm64:1
